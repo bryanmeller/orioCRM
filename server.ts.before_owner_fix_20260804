@@ -1,0 +1,1457 @@
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import path from 'path';
+import { createServer as createViteServer } from 'vite';
+import { createClient } from '@supabase/supabase-js';
+import { lynxRouter } from './server/routes/lynxRoutes.js';
+import { parseServerInput } from './src/utils/xtreamParser.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const JWT_SECRET = process.env.JWT_SECRET || 'streamflix_super_secret_key_123';
+const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+console.log('service role configured:', !!supabaseServiceKey);
+
+const supabaseAdmin = supabaseUrl && supabaseServiceKey ? createClient(supabaseUrl, supabaseServiceKey) : null;
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  // Basic CORS & OPTIONS handling middleware
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
+  
+  // Lynx API Routes
+  app.use('/api/lynx', lynxRouter);
+
+  app.get('/api/health', (req, res) => {
+    res.json({ ok: true });
+  });
+
+  // Flutter App API: Request Trial
+  
+  // Shared Auth Middleware using Supabase Auth SDK
+  async function requireAdminAuth(req: any, res: any, next: any) {
+    try {
+      if (!supabaseAdmin) {
+        return res.status(500).json({ error: 'Configuração administrativa do Supabase ausente.' });
+      }
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).json({ error: 'Não autorizado (Token ausente)' });
+      }
+
+      const token = authHeader.replace('Bearer ', '').trim();
+      let authenticatedUser: any = null;
+
+      // 1. Primary validation via Supabase Auth SDK
+      const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token);
+      if (!userError && user) {
+        authenticatedUser = user;
+      } else {
+        // 2. Fallback for custom signed JWTs if applicable
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET) as any;
+          if (decoded && decoded.id) {
+            authenticatedUser = { id: decoded.id, email: decoded.email };
+          }
+        } catch (jwtErr) {
+          // Ignore
+        }
+      }
+
+      if (!authenticatedUser || !authenticatedUser.id) {
+        return res.status(401).json({ error: 'Não autorizado (Token inválido ou expirado)' });
+      }
+
+      // 3. Fetch user profile
+      const { data: profile, error: profileError } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('id', authenticatedUser.id)
+        .single();
+
+      if (profileError || !profile) {
+        return res.status(403).json({ error: 'Perfil de usuário não encontrado.' });
+      }
+
+      if (profile.deleted_at !== null) {
+        return res.status(403).json({ error: 'Perfil removido ou desativado.' });
+      }
+
+      const st = profile.status;
+      if (st === 'BLOCKED' || st === 'INACTIVE' || st === 'Bloqueado' || st === 'Suspenso') {
+        return res.status(403).json({ error: 'Perfil inativo ou bloqueado.' });
+      }
+
+      req.authUser = authenticatedUser;
+      req.authProfile = profile;
+      next();
+    } catch (err: any) {
+      console.error('Error in requireAdminAuth middleware:', err);
+      return res.status(401).json({ error: 'Falha no processamento de autenticação.' });
+    }
+  }
+
+  app.post('/api/admin/create-auth-user', requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const creatorProfile = req.authProfile;
+      const user = req.authUser;
+
+      if (!['SUPER_ADMIN', 'PROVEDOR', 'REVENDA', 'SUBREVENDA', 'PROVIDER', 'RESELLER', 'SUB_RESELLER'].includes(creatorProfile.role)) {
+        return res.status(403).json({ error: 'Não autorizado (Role insuficiente)' });
+      }
+
+      const { email, password, full_name, role, parent_id, business_mode, username, portal_access, origin, status, plan_id, selected_server_ids, phone, internal_notes, notes, internalNotes } = req.body;
+      
+      // 1. Data Normalization
+      let finalUsername = username;
+      if (!finalUsername) {
+        finalUsername = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '') + Math.floor(Math.random() * 10000);
+      }
+
+      let officialRole = role;
+      if (role === 'PROVEDOR') officialRole = 'PROVIDER';
+      if (role === 'REVENDA') officialRole = 'RESELLER';
+      if (role === 'SUBREVENDA') officialRole = 'SUB_RESELLER';
+
+      let finalBusinessMode = business_mode;
+      if (!finalBusinessMode) {
+        if (officialRole === 'PROVIDER') finalBusinessMode = 'PROVIDER';
+        else if (officialRole === 'RESELLER') finalBusinessMode = 'RESELLER';
+        else if (officialRole === 'SUB_RESELLER') finalBusinessMode = 'SUB_RESELLER';
+        else if (officialRole === 'SUPER_ADMIN') finalBusinessMode = 'SYSTEM';
+        else finalBusinessMode = 'CUSTOMER';
+      }
+
+      const finalParentId = parent_id ? parent_id : null;
+      const notesToSave = internal_notes !== undefined ? internal_notes : (notes !== undefined ? notes : (internalNotes !== undefined ? internalNotes : null));
+      const safeFullName = full_name || username || (email ? email.split('@')[0] : 'Usuário Final');
+
+      // Status mapping for user_metadata and profiles (profile_status_enum doesn't allow TRIAL)
+      let authMetadataStatus = status || 'ACTIVE';
+      if (authMetadataStatus === 'TRIAL' || authMetadataStatus === 'Trial') {
+        authMetadataStatus = 'ACTIVE';
+      }
+
+      // 2. Create Auth User
+      const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
+        email: email,
+        password: password || 'ChangeMe123!',
+        email_confirm: true,
+        user_metadata: {
+          full_name: safeFullName,
+          role: officialRole,
+          username: finalUsername,
+          parent_id: finalParentId,
+          business_mode: finalBusinessMode,
+          portal_access: portal_access || false,
+          origin: origin || 'ADMIN_CREATED',
+          status: authMetadataStatus,
+          phone: phone || ''
+        }
+      });
+      
+      if (createError) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: "AUTH_CREATION_FAILED",
+            message: createError.message && createError.message !== '{}' ? createError.message : "Erro ao criar usuário no Auth.",
+            details: createError
+          }
+        });
+      }
+
+      const userId = newUser.user.id;
+
+      // Map status for public.profiles (profile_status_enum doesn't contain TRIAL)
+      let profileStatus = status || 'ACTIVE';
+      if (profileStatus === 'TRIAL' || profileStatus === 'Trial') {
+        profileStatus = 'ACTIVE';
+      }
+
+      // 3. Upsert public.profiles (handles trigger collisions)
+      const profilePayload = {
+        id: userId,
+        full_name: safeFullName,
+        role: officialRole,
+        parent_id: finalParentId,
+        username: finalUsername,
+        email: email,
+        status: profileStatus,
+        business_mode: finalBusinessMode,
+        portal_access: portal_access || false,
+        internal_notes: notesToSave
+      };
+
+      const { error: insertProfileError } = await supabaseAdmin.from('profiles').upsert(profilePayload);
+
+      if (insertProfileError) {
+        console.error('Profile Insert Error:', insertProfileError);
+        await supabaseAdmin.auth.admin.deleteUser(userId);
+        return res.status(500).json({ 
+          success: false,
+          error: {
+            code: "PROFILE_CREATION_FAILED",
+            message: "Erro ao criar perfil do usuário: " + insertProfileError.message,
+            details: insertProfileError
+          }
+        });
+      }
+
+      // 4. Fluxo especifico por Role
+      let balanceCreated = false;
+
+      if (role === 'RESELLER' || role === 'SUB_RESELLER' || role === 'REVENDA' || role === 'SUBREVENDA') {
+        const { error: balanceError } = await supabaseAdmin.from('credit_balances').insert({
+          owner_id: userId,
+          balance: 0
+        });
+        if (balanceError) {
+          await supabaseAdmin.auth.admin.deleteUser(userId);
+          await supabaseAdmin.from('profiles').delete().eq('id', userId);
+          return res.status(500).json({ error: 'Erro ao criar saldo da revenda.' });
+        }
+        balanceCreated = true;
+      }
+
+      if ((role === 'PROVIDER' || role === 'PROVEDOR') && plan_id) {
+        const { data: plan } = await supabaseAdmin.from('provider_plans').select('*').eq('id', plan_id).single();
+        if (plan) {
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 30);
+          const { error: subError } = await supabaseAdmin.from('provider_subscriptions').insert({
+            provider_id: userId,
+            plan_id: plan.id,
+            expires_at: expiresAt.toISOString(),
+          });
+          if (subError) {
+            await supabaseAdmin.auth.admin.deleteUser(userId);
+            await supabaseAdmin.from('profiles').delete().eq('id', userId);
+            return res.status(500).json({ error: 'Erro ao vincular plano do provedor.' });
+          }
+        }
+      }
+
+      if (role === 'END_USER') {
+        // Criar licença
+        if (!plan_id) {
+           await supabaseAdmin.auth.admin.deleteUser(userId);
+           await supabaseAdmin.from('profiles').delete().eq('id', userId);
+           return res.status(400).json({
+             success: false,
+             error: {
+               code: "MISSING_PLAN",
+               message: "Plano é obrigatório para Usuário Final.",
+               details: null
+             }
+           });
+        }
+        const { data: plan, error: planError } = await supabaseAdmin.from('license_plans')
+            .select('*').eq('id', plan_id).eq('status', 'ACTIVE').is('deleted_at', null).single();
+            
+        if (planError || !plan) {
+           await supabaseAdmin.auth.admin.deleteUser(userId);
+           await supabaseAdmin.from('profiles').delete().eq('id', userId);
+           return res.status(400).json({
+             success: false,
+             error: {
+               code: "INVALID_PLAN",
+               message: "Plano de Licença inválido ou não encontrado.",
+               details: planError
+             }
+           });
+        }
+
+        const isTrialMode = (status === 'TRIAL' || status === 'Trial');
+
+        // Debit credits if creator is Reseller and NOT a Trial
+        if (!isTrialMode && (creatorProfile.role === 'RESELLER' || creatorProfile.role === 'SUB_RESELLER' || creatorProfile.role === 'REVENDA' || creatorProfile.role === 'SUBREVENDA')) {
+            const cost = plan.reseller_credit_cost || plan.credit_cost || 0;
+            if (cost > 0) {
+                const { data: balanceData } = await supabaseAdmin.from('credit_balances').select('balance').eq('owner_id', user.id).single();
+                if (!balanceData || balanceData.balance < cost) {
+                    await supabaseAdmin.auth.admin.deleteUser(userId);
+                    await supabaseAdmin.from('profiles').delete().eq('id', userId);
+                    return res.status(400).json({
+                      success: false,
+                      error: {
+                        code: "INSUFFICIENT_CREDITS",
+                        message: "Saldo insuficiente para ativar licença.",
+                        details: null
+                      }
+                    });
+                }
+                
+                await supabaseAdmin.from('credit_transactions').insert([{
+                    from_owner_id: user.id,
+                    amount: cost,
+                    type: 'LICENSE_CREATION',
+                    description: `Criação de licença ativa para ${userId}`
+                }]);
+                
+                await supabaseAdmin.from('credit_balances')
+                    .update({ balance: balanceData.balance - cost })
+                    .eq('owner_id', user.id);
+            }
+        }
+
+        const expiresAt = new Date();
+        let validityDays = 7;
+        if (isTrialMode) {
+          if (plan.trial_days && plan.trial_days > 0) {
+            validityDays = plan.trial_days;
+          } else {
+            const { data: trialSetting } = await supabaseAdmin
+              .from('system_settings')
+              .select('setting_value')
+              .eq('setting_key', 'trial_days_default')
+              .maybeSingle();
+            if (trialSetting?.setting_value) {
+              validityDays = parseInt(trialSetting.setting_value, 10) || 7;
+            }
+          }
+        } else {
+          validityDays = plan.validity_days || 30;
+        }
+        expiresAt.setDate(expiresAt.getDate() + validityDays);
+        
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+        
+        const { error: licError, data: newLicense } = await supabaseAdmin.from('licenses').insert([{
+          code,
+          owner_id: user.id, // Creator is owner
+          end_user_id: userId,
+          origin: creatorProfile.role,
+          plan_id: plan.id,
+          expires_at: expiresAt.toISOString(),
+          devices_allowed: isTrialMode ? 1 : (plan.devices_allowed || 1),
+          max_servers: plan.max_servers || 1,
+          portal_access: portal_access || false,
+          status: isTrialMode ? 'TRIAL' : 'ACTIVE'
+        }]).select().single();
+        
+        if (licError) {
+           console.error('License Insert Error:', licError);
+           await supabaseAdmin.auth.admin.deleteUser(userId);
+           await supabaseAdmin.from('profiles').delete().eq('id', userId);
+           return res.status(500).json({
+             success: false,
+             error: {
+               code: "TRIAL_CREATION_FAILED",
+               message: "Erro ao criar licença do usuário: " + licError.message,
+               details: licError
+             }
+           });
+        }
+
+        if (selected_server_ids && selected_server_ids.length > 0) {
+          if (creatorProfile.role !== 'SUPER_ADMIN') {
+            const { data: validServers } = await supabaseAdmin.from('iptv_servers')
+              .select('id')
+              .in('id', selected_server_ids)
+              .eq('owner_id', user.id);
+              
+            if (!validServers || validServers.length !== selected_server_ids.length) {
+              await supabaseAdmin.auth.admin.deleteUser(userId);
+              await supabaseAdmin.from('profiles').delete().eq('id', userId);
+              await supabaseAdmin.from('licenses').delete().eq('id', newLicense.id);
+              return res.status(400).json({
+                success: false,
+                error: {
+                  code: "INVALID_DNS_SELECTION",
+                  message: "Um ou mais Servidores (DNS) selecionados não pertencem à sua conta.",
+                  details: null
+                }
+              });
+            }
+          }
+          
+          if (selected_server_ids.length > (plan.max_servers || 1)) {
+            await supabaseAdmin.auth.admin.deleteUser(userId);
+            await supabaseAdmin.from('profiles').delete().eq('id', userId);
+            await supabaseAdmin.from('licenses').delete().eq('id', newLicense.id);
+            return res.status(400).json({
+              success: false,
+              error: {
+                code: "DNS_LIMIT_EXCEEDED",
+                message: "Quantidade de Servidores (DNS) excede o limite do plano.",
+                details: null
+              }
+            });
+          }
+
+          const serverLinks = selected_server_ids.map((dnsId: string) => ({
+            license_id: newLicense.id,
+            server_id: dnsId
+          }));
+          await supabaseAdmin.from('license_servers').insert(serverLinks);
+        }
+      }
+
+      // 5. Query again to confirm
+      const { data: finalProfile } = await supabaseAdmin.from('profiles').select('*').eq('id', userId).single();
+      
+      // Fetch updated profile to get provider_code if it was generated
+      const { data: updatedProfile } = await supabaseAdmin.from('profiles').select('provider_code').eq('id', userId).single();
+      
+      // Fetch license code if created
+      let licenseCode = null;
+      let licenseId = null;
+      if (role === 'END_USER') {
+        const { data: licData } = await supabaseAdmin.from('licenses').select('id, code').eq('end_user_id', userId).single();
+        if (licData) {
+            licenseCode = licData.code;
+            licenseId = licData.id;
+        }
+      }
+      
+      return res.status(200).json({ 
+        success: true, 
+        userId: userId, 
+        profileCreated: !!finalProfile,
+        balanceCreated: balanceCreated,
+        providerCode: updatedProfile?.provider_code || null,
+        licenseCreated: !!licenseId,
+        licenseId: licenseId,
+        licenseCode: licenseCode,
+        password: password || 'ChangeMe123!',
+        username: finalUsername,
+        user: newUser.user
+      });
+      
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Erro interno' });
+    }
+  });
+
+  // Admin: Convert Trial to Active License
+  app.post('/api/admin/convert-trial', requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const adminProfile = req.authProfile;
+
+      const { licenseId, planId } = req.body;
+      if (!licenseId) return res.status(400).json({ error: 'ID da licença é obrigatório' });
+
+      const { data: license, error: licErr } = await supabaseAdmin.from('licenses').select('*').eq('id', licenseId).single();
+      if (licErr || !license) return res.status(404).json({ error: 'Licença não encontrada' });
+
+      if (license.status !== 'TRIAL') {
+        return res.status(400).json({ error: 'Apenas licenças em estado TRIAL podem ser convertidas.' });
+      }
+
+      const targetPlanId = planId || license.plan_id;
+      const { data: plan, error: planErr } = await supabaseAdmin.from('license_plans').select('*').eq('id', targetPlanId).single();
+      if (planErr || !plan) return res.status(400).json({ error: 'Plano inválido para conversão.' });
+
+      // If reseller/subreseller converts trial, debit credits
+      if (adminProfile.role === 'RESELLER' || adminProfile.role === 'SUB_RESELLER' || adminProfile.role === 'REVENDA' || adminProfile.role === 'SUBREVENDA') {
+        const cost = plan.reseller_credit_cost || plan.credit_cost || 0;
+        if (cost > 0) {
+          const { data: balanceData } = await supabaseAdmin.from('credit_balances').select('balance').eq('owner_id', adminProfile.id).single();
+          if (!balanceData || balanceData.balance < cost) {
+            return res.status(400).json({ error: 'Saldo insuficiente para converter teste em licença ativa.' });
+          }
+
+          await supabaseAdmin.from('credit_transactions').insert([{
+            from_owner_id: adminProfile.id,
+            amount: cost,
+            type: 'TRIAL_CONVERSION',
+            description: `Conversão de teste para licença ${license.code}`
+          }]);
+
+          await supabaseAdmin.from('credit_balances')
+            .update({ balance: balanceData.balance - cost })
+            .eq('owner_id', adminProfile.id);
+        }
+      }
+
+      const newExpiresAt = new Date();
+      newExpiresAt.setDate(newExpiresAt.getDate() + (plan.validity_days || 30));
+
+      const { data: updatedLicense, error: updateErr } = await supabaseAdmin.from('licenses')
+        .update({
+          status: 'ACTIVE',
+          plan_id: plan.id,
+          expires_at: newExpiresAt.toISOString(),
+          devices_allowed: plan.devices_allowed || license.devices_allowed,
+          max_servers: plan.max_servers || license.max_servers
+        })
+        .eq('id', licenseId)
+        .select()
+        .single();
+
+      if (updateErr) throw updateErr;
+
+      res.json({ success: true, message: 'Teste convertido em licença ativa com sucesso!', license: updatedLicense });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Erro ao converter teste.' });
+    }
+  });
+
+  // Admin: Renew License
+  app.post('/api/admin/renew-license', requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const adminProfile = req.authProfile;
+
+      const { licenseId, planId } = req.body;
+      if (!licenseId) return res.status(400).json({ error: 'ID da licença é obrigatório' });
+
+      const { data: license, error: licErr } = await supabaseAdmin.from('licenses').select('*').eq('id', licenseId).single();
+      if (licErr || !license) return res.status(404).json({ error: 'Licença não encontrada' });
+
+      const targetPlanId = planId || license.plan_id;
+      const { data: plan, error: planErr } = await supabaseAdmin.from('license_plans').select('*').eq('id', targetPlanId).single();
+      if (planErr || !plan) return res.status(400).json({ error: 'Plano inválido para renovação.' });
+
+      // Debit reseller credits if applicable
+      if (adminProfile.role === 'RESELLER' || adminProfile.role === 'SUB_RESELLER' || adminProfile.role === 'REVENDA' || adminProfile.role === 'SUBREVENDA') {
+        const cost = plan.reseller_credit_cost || plan.credit_cost || 0;
+        if (cost > 0) {
+          const { data: balanceData } = await supabaseAdmin.from('credit_balances').select('balance').eq('owner_id', adminProfile.id).single();
+          if (!balanceData || balanceData.balance < cost) {
+            return res.status(400).json({ error: 'Saldo insuficiente para renovar licença.' });
+          }
+
+          await supabaseAdmin.from('credit_transactions').insert([{
+            from_owner_id: adminProfile.id,
+            amount: cost,
+            type: 'LICENSE_RENEWAL',
+            description: `Renovação da licença ${license.code}`
+          }]);
+
+          await supabaseAdmin.from('credit_balances')
+            .update({ balance: balanceData.balance - cost })
+            .eq('owner_id', adminProfile.id);
+        }
+      }
+
+      let baseDate = new Date();
+      if (license.expires_at && new Date(license.expires_at) > new Date()) {
+        baseDate = new Date(license.expires_at);
+      }
+      baseDate.setDate(baseDate.getDate() + (plan.validity_days || 30));
+
+      const { data: updatedLicense, error: updateErr } = await supabaseAdmin.from('licenses')
+        .update({
+          status: 'ACTIVE',
+          plan_id: plan.id,
+          expires_at: baseDate.toISOString()
+        })
+        .eq('id', licenseId)
+        .select()
+        .single();
+
+      if (updateErr) throw updateErr;
+
+      res.json({ success: true, message: `Licença ${license.code} renovada com sucesso!`, license: updatedLicense });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Erro ao renovar licença.' });
+    }
+  });
+
+  // Admin: Reset End User Password
+  app.post('/api/admin/reset-user-password', requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const { userId, newPassword } = req.body;
+      if (!userId || !newPassword) return res.status(400).json({ error: 'ID do usuário e nova senha são obrigatórios' });
+
+      if (newPassword.length < 6) {
+        return res.status(400).json({ error: 'A nova senha deve ter no mínimo 6 caracteres.' });
+      }
+
+      const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+        password: newPassword
+      });
+
+      if (updateErr) throw updateErr;
+
+      res.json({ success: true, message: 'Senha do usuário atualizada com sucesso no Supabase Auth!' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Erro ao redefinir senha do usuário.' });
+    }
+  });
+
+  // Admin: Get End User DTO for Edit Modal
+  app.get(['/api/admin/end-user-dto/:id', '/api/admin/end-user/:id'], requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const userId = req.params.id;
+      if (!userId) return res.status(400).json({ error: 'ID do usuário é obrigatório' });
+
+      // 1. Fetch Profile
+      const { data: profile, error: profileErr } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (profileErr || !profile) {
+        return res.status(404).json({ error: 'Perfil de usuário não encontrado.' });
+      }
+
+      // Fetch Auth User for Phone and Metadata
+      const { data: authUserData } = await supabaseAdmin.auth.admin.getUserById(userId);
+      const authUser = authUserData?.user;
+      const userPhone = authUser?.user_metadata?.phone || authUser?.phone || '';
+
+      // Tenant validation check
+      if (req.authProfile.role !== 'SUPER_ADMIN' && profile.parent_id !== req.authProfile.id) {
+        const { data: licCheck } = await supabaseAdmin
+          .from('licenses')
+          .select('owner_id')
+          .eq('end_user_id', profile.id)
+          .eq('owner_id', req.authProfile.id)
+          .is('deleted_at', null);
+
+        if (!licCheck || licCheck.length === 0) {
+          return res.status(403).json({ error: 'Acesso negado para este usuário final.' });
+        }
+      }
+
+      // 2. Fetch License with Plan
+      const { data: licenses } = await supabaseAdmin
+        .from('licenses')
+        .select('*, plan:license_plans(*)')
+        .eq('end_user_id', userId)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false });
+
+      const activeLicense = (licenses && licenses.length > 0) ? licenses[0] : null;
+
+      // 3. Fetch Linked Servers (DNS)
+      let selectedServerIds: string[] = [];
+      if (activeLicense) {
+        const { data: lServers } = await supabaseAdmin
+          .from('license_servers')
+          .select('server_id')
+          .eq('license_id', activeLicense.id);
+
+        if (lServers && lServers.length > 0) {
+          selectedServerIds = lServers.map((ls: any) => ls.server_id);
+        }
+      }
+
+      // Map status
+      let mappedStatus = profile.status || 'Ativo';
+      if (mappedStatus === 'ACTIVE') mappedStatus = 'Ativo';
+      if (mappedStatus === 'INACTIVE' || mappedStatus === 'BLOCKED') mappedStatus = 'Bloqueado';
+      if (mappedStatus === 'SUSPENDED') mappedStatus = 'Suspenso';
+
+      // 4. Build single unified DTO conforming to required spec
+      const dto = {
+        // PROFILE
+        id: profile.id,
+        full_name: profile.full_name || '',
+        name: profile.full_name || '',
+        username: profile.username || '',
+        phone: userPhone,
+        email: profile.email || authUser?.email || '',
+        status: mappedStatus,
+        portal_access: profile.portal_access ?? activeLicense?.portal_access ?? false,
+        internal_notes: profile.internal_notes || profile.notes || '',
+        notes: profile.internal_notes || profile.notes || '',
+        parent_id: profile.parent_id || null,
+        origin: profile.origin || activeLicense?.origin || 'SUPER_ADMIN',
+
+        // LICENSE
+        license_id: activeLicense ? activeLicense.id : null,
+        license_code: activeLicense ? activeLicense.code : null,
+        code: activeLicense ? activeLicense.code : null,
+        license_status: activeLicense ? activeLicense.status : null,
+        expires_at: activeLicense ? activeLicense.expires_at : null,
+        devices_allowed: activeLicense ? (activeLicense.devices_allowed || activeLicense.plan?.devices_allowed || 1) : 1,
+        max_servers: activeLicense ? (activeLicense.max_servers || activeLicense.plan?.max_servers || 1) : 1,
+
+        // PLAN
+        plan_id: activeLicense ? activeLicense.plan_id : '',
+        planId: activeLicense ? activeLicense.plan_id : '',
+        plan_name: activeLicense?.plan ? activeLicense.plan.name : (activeLicense ? 'Plano de Licença' : 'Usuário sem licença vinculada'),
+
+        // DNS & METADATA
+        selected_server_ids: selectedServerIds,
+        authorizedDns: selectedServerIds,
+        has_license: !!activeLicense
+      };
+
+      return res.json({ success: true, dto, user: dto });
+    } catch (err: any) {
+      console.error('Error fetching end user DTO:', err);
+      return res.status(500).json({ error: err.message || 'Erro ao carregar DTO do usuário.' });
+    }
+  });
+
+  // Admin: Update End User
+  app.post('/api/admin/update-end-user', requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const {
+        id,
+        name,
+        full_name,
+        username,
+        email,
+        phone,
+        status,
+        notes,
+        internal_notes,
+        internalNotes,
+        planId,
+        plan_id,
+        selected_server_ids,
+        portal_access
+      } = req.body;
+
+      if (!id) return res.status(400).json({ error: 'ID do usuário é obrigatório' });
+
+      // Tenant check
+      if (req.authProfile.role !== 'SUPER_ADMIN') {
+        const { data: targetProf } = await supabaseAdmin.from('profiles').select('parent_id').eq('id', id).single();
+        if (targetProf && targetProf.parent_id !== req.authProfile.id) {
+          const { data: licCheck } = await supabaseAdmin
+            .from('licenses')
+            .select('owner_id')
+            .eq('end_user_id', id)
+            .eq('owner_id', req.authProfile.id)
+            .is('deleted_at', null);
+
+          if (!licCheck || licCheck.length === 0) {
+            return res.status(403).json({ error: 'Sem permissão para atualizar este usuário.' });
+          }
+        }
+      }
+
+      const nameToSave = full_name || name || '';
+      let dbStatus = status;
+      if (status === 'Ativo') dbStatus = 'ACTIVE';
+      if (status === 'Bloqueado' || status === 'Inativo') dbStatus = 'INACTIVE';
+      if (status === 'Suspenso') dbStatus = 'SUSPENDED';
+      if (status === 'TRIAL' || status === 'Trial') dbStatus = 'ACTIVE';
+
+      const notesToSave = internal_notes !== undefined ? internal_notes : (notes !== undefined ? notes : (internalNotes !== undefined ? internalNotes : null));
+
+      // 1. Update profiles table
+      const profileUpdates: any = {
+        full_name: nameToSave,
+        status: dbStatus,
+        portal_access: portal_access ?? false,
+        internal_notes: notesToSave
+      };
+      if (email) profileUpdates.email = email;
+
+      const { error: profileErr } = await supabaseAdmin
+        .from('profiles')
+        .update(profileUpdates)
+        .eq('id', id);
+
+      if (profileErr) {
+        console.error('Error updating profile:', profileErr);
+        return res.status(500).json({
+          success: false,
+          error: {
+            code: "PROFILE_UPDATE_FAILED",
+            message: 'Erro ao atualizar perfil do usuário: ' + profileErr.message,
+            details: profileErr
+          }
+        });
+      }
+
+      // Update Auth user metadata & email
+      try {
+        const { data: currentAuth } = await supabaseAdmin.auth.admin.getUserById(id);
+        const existingMeta = currentAuth?.user?.user_metadata || {};
+        const newMeta = {
+          ...existingMeta,
+          full_name: nameToSave,
+          phone: phone !== undefined ? phone : (existingMeta.phone || '')
+        };
+
+        const authUpdates: any = { user_metadata: newMeta };
+        if (email) authUpdates.email = email;
+
+        await supabaseAdmin.auth.admin.updateUserById(id, authUpdates);
+      } catch (e) {
+        console.error('Error updating auth metadata/email:', e);
+      }
+
+      // 2. Update or sync License & Plan
+      const targetPlanId = plan_id || planId;
+      const { data: licenses } = await supabaseAdmin
+        .from('licenses')
+        .select('*')
+        .eq('end_user_id', id)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false });
+
+      let license = (licenses && licenses.length > 0) ? licenses[0] : null;
+
+      if (license) {
+        const licenseUpdates: any = {
+          portal_access: portal_access ?? false,
+          status: dbStatus === 'ACTIVE' ? 'ACTIVE' : (dbStatus === 'TRIAL' ? 'TRIAL' : 'INACTIVE')
+        };
+
+        if (targetPlanId && targetPlanId !== license.plan_id) {
+          licenseUpdates.plan_id = targetPlanId;
+          const { data: plan } = await supabaseAdmin
+            .from('license_plans')
+            .select('*')
+            .eq('id', targetPlanId)
+            .single();
+
+          if (plan) {
+            licenseUpdates.devices_allowed = plan.devices_allowed || 1;
+            licenseUpdates.max_servers = plan.max_servers || 1;
+
+            if (license.status === 'ACTIVE' || license.status === 'Ativo') {
+              const baseDate = new Date();
+              baseDate.setDate(baseDate.getDate() + (plan.validity_days || 30));
+              licenseUpdates.expires_at = baseDate.toISOString();
+            }
+          }
+        }
+
+        const { error: licErr } = await supabaseAdmin
+          .from('licenses')
+          .update(licenseUpdates)
+          .eq('id', license.id);
+
+        if (licErr) {
+          console.error('Error updating license:', licErr);
+        }
+
+        // 3. Sync license_servers
+        if (Array.isArray(selected_server_ids)) {
+          await supabaseAdmin.from('license_servers').delete().eq('license_id', license.id);
+          if (selected_server_ids.length > 0) {
+            const serverLinks = selected_server_ids.map((sId: string) => ({
+              license_id: license.id,
+              server_id: sId
+            }));
+            await supabaseAdmin.from('license_servers').insert(serverLinks);
+          }
+        }
+      }
+
+      // Verification of update persistence
+      const { data: verifyProf } = await supabaseAdmin.from('profiles').select('id, full_name, email, status, internal_notes').eq('id', id).single();
+      const { data: verifyAuth } = await supabaseAdmin.auth.admin.getUserById(id);
+      const verifiedPhone = verifyAuth?.user?.user_metadata?.phone || verifyAuth?.user?.phone || '';
+
+      return res.json({
+        success: true,
+        message: 'Usuário final atualizado com sucesso.',
+        user: {
+          id,
+          full_name: verifyProf?.full_name,
+          email: verifyProf?.email,
+          phone: verifiedPhone,
+          internal_notes: verifyProf?.internal_notes,
+          status: verifyProf?.status
+        }
+      });
+    } catch (err: any) {
+      console.error('Error updating end user:', err);
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: "UPDATE_FAILED",
+          message: err.message || 'Erro ao atualizar usuário final.',
+          details: err
+        }
+      });
+    }
+  });
+
+  // Admin: Update Account (Provedor / Revenda / Sub-Revenda)
+  app.post('/api/admin/update-account', requireAdminAuth, async (req: any, res: any) => {
+    try {
+      const { id, full_name, email, status, parent_id, plan_id } = req.body;
+      if (!id) return res.status(400).json({ error: 'ID da conta é obrigatório' });
+
+      // Permission check: SUPER_ADMIN or account owner
+      if (req.authProfile.role !== 'SUPER_ADMIN') {
+        const { data: targetAccount } = await supabaseAdmin.from('profiles').select('parent_id').eq('id', id).single();
+        if (!targetAccount || targetAccount.parent_id !== req.authProfile.id) {
+          return res.status(403).json({ error: 'Sem permissão para atualizar esta conta.' });
+        }
+      }
+
+      const updates: any = {};
+      if (full_name !== undefined) updates.full_name = full_name;
+      if (email !== undefined) updates.email = email;
+      if (status !== undefined) updates.status = status;
+      if (parent_id !== undefined) updates.parent_id = parent_id;
+
+      if (Object.keys(updates).length > 0) {
+        const { error: profileErr } = await supabaseAdmin
+          .from('profiles')
+          .update(updates)
+          .eq('id', id);
+
+        if (profileErr) {
+          return res.status(500).json({ error: 'Erro ao atualizar conta: ' + profileErr.message });
+        }
+      }
+
+      if (email) {
+        try {
+          await supabaseAdmin.auth.admin.updateUserById(id, { email });
+        } catch (authErr) {
+          console.error('Error updating auth email for account:', authErr);
+        }
+      }
+
+      // If plan_id provided for Provider
+      if (plan_id) {
+        const { data: sub } = await supabaseAdmin
+          .from('provider_subscriptions')
+          .select('id')
+          .eq('provider_id', id)
+          .maybeSingle();
+
+        if (sub) {
+          await supabaseAdmin
+            .from('provider_subscriptions')
+            .update({ plan_id })
+            .eq('id', sub.id);
+        } else {
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 30);
+          await supabaseAdmin
+            .from('provider_subscriptions')
+            .insert({
+              provider_id: id,
+              plan_id,
+              expires_at: expiresAt.toISOString(),
+              status: 'ACTIVE'
+            });
+        }
+      }
+
+      return res.json({ success: true, message: 'Conta atualizada com sucesso.' });
+    } catch (err: any) {
+      console.error('Error updating account:', err);
+      return res.status(500).json({ error: err.message || 'Erro ao atualizar conta.' });
+    }
+  });
+
+  app.post('/v1/auth/app/trial', async (req, res) => {
+    try {
+      const { deviceId } = req.body;
+      if (!deviceId) return res.status(400).json({ success: false, error: 'Device ID required' });
+      
+      // Look for existing trial
+      const { data: existingLicense } = await supabaseAdmin.from('licenses')
+        .select('*')
+        .eq('trial_device_id', deviceId)
+        .eq('status', 'TRIAL')
+        .single();
+        
+      if (existingLicense) {
+        if (new Date(existingLicense.valid_until) < new Date()) {
+           return res.status(403).json({ success: false, error: 'Seu período de teste já expirou.' });
+        }
+        return res.json({ success: true, licenseCode: existingLicense.code, message: 'Trial recuperado com sucesso.' });
+      }
+
+      // Check if this device ever had a trial before
+      const { data: pastTrial } = await supabaseAdmin.from('licenses')
+        .select('*')
+        .eq('trial_device_id', deviceId)
+        .limit(1);
+        
+      if (pastTrial && pastTrial.length > 0) {
+        return res.status(403).json({ success: false, error: 'Este dispositivo já utilizou o teste gratuito.' });
+      }
+
+      const trialCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const validUntil = new Date();
+      validUntil.setDate(validUntil.getDate() + 7);
+
+      const { data, error } = await supabaseAdmin.from('licenses').insert([{
+        code: trialCode,
+        status: 'TRIAL',
+        valid_until: validUntil.toISOString(),
+        trial_device_id: deviceId,
+        max_devices: 1
+      }]).select().single();
+
+      if (error) throw error;
+      res.json({ success: true, licenseCode: data.code });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Flutter App API: Login
+  app.post('/v1/auth/app/login', async (req, res) => {
+    try {
+      const { licenseCode, username, password, deviceId } = req.body;
+      
+      let userId: string | null = null;
+      if (username && password) {
+        const { data: authData, error: authError } = await supabaseAdmin.auth.signInWithPassword({
+          email: username.includes('@') ? username : username + '@streamflix.local',
+          password
+        });
+        if (!authError && authData.user) {
+          userId = authData.user.id;
+        }
+      }
+
+      let query = supabaseAdmin.from('licenses').select('*, plan:license_plans(*)').eq('code', licenseCode);
+      if (userId) {
+        query = query.eq('end_user_id', userId);
+      }
+      const { data: license, error: licenseError } = await query.single();
+
+      if (licenseError || !license) {
+         return res.status(401).json({ success: false, error: 'Licença não encontrada ou código inválido.' });
+      }
+
+      if (license.status === 'BLOCKED' || license.status === 'INACTIVE' || license.status === 'SUSPENDED' || license.status === 'CANCELLED') {
+         return res.status(403).json({ success: false, error: 'Licença bloqueada ou inativa.' });
+      }
+
+      if (license.expires_at && new Date(license.expires_at) < new Date()) {
+         return res.status(403).json({ success: false, error: 'Licença expirada.' });
+      }
+      
+      // Device check/registration via license_devices
+      const { data: devices } = await supabaseAdmin.from('license_devices').select('*').eq('license_id', license.id);
+      const existingDevices = devices || [];
+      let currentDevice = existingDevices.find(d => d.device_id === deviceId);
+      
+      const maxDevs = license.devices_allowed || license.plan?.devices_allowed || 1;
+
+      if (!currentDevice) {
+         if (existingDevices.length >= maxDevs) {
+             return res.status(403).json({ success: false, error: `Esta licença atingiu o limite de ${maxDevs} dispositivo(s) permitido(s).` });
+         }
+         const { data: newDev } = await supabaseAdmin.from('license_devices').insert([{
+             license_id: license.id,
+             device_id: deviceId || `DEV-${Date.now()}`,
+             device_name: 'Smart TV App Device',
+             platform: 'Android TV',
+             first_seen_at: new Date().toISOString(),
+             last_seen_at: new Date().toISOString()
+         }]).select().single();
+         currentDevice = newDev;
+      } else {
+         await supabaseAdmin.from('license_devices')
+           .update({ last_seen_at: new Date().toISOString() })
+           .eq('id', currentDevice.id);
+      }
+
+      // Fetch servers linked to license or creator servers
+      const { data: lServers } = await supabaseAdmin.from('license_servers')
+        .select('server_id')
+        .eq('license_id', license.id);
+
+      let servers: any[] = [];
+      if (lServers && lServers.length > 0) {
+        const sIds = lServers.map(ls => ls.server_id);
+        const { data: srvs } = await supabaseAdmin.from('iptv_servers').select('*').in('id', sIds).is('deleted_at', null);
+        servers = srvs || [];
+      }
+
+      if (servers.length === 0 && license.owner_id) {
+        const { data: cServers } = await supabaseAdmin.from('iptv_servers').select('*').eq('owner_id', license.owner_id).is('deleted_at', null);
+        servers = cServers || [];
+      }
+
+      const token = jwt.sign({ id: license.end_user_id || license.id, code: licenseCode }, JWT_SECRET, { expiresIn: '7d' });
+
+      res.json({
+        success: true,
+        token,
+        user: { id: license.end_user_id, username: username || license.code },
+        license: {
+            code: license.code,
+            status: license.status,
+            isTrial: license.status === 'TRIAL',
+            valid_until: license.expires_at,
+            max_devices: maxDevs,
+            used_devices: currentDevice ? existingDevices.length : existingDevices.length + 1
+        },
+        servers: servers || []
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Portal Login
+  app.post('/api/auth/portal/login', async (req, res) => {
+    try {
+      const { email, password } = req.body;
+      const { data, error } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+      if (error || !data.user) throw new Error('Credenciais inválidas');
+      
+      const token = jwt.sign({ id: data.user.id, email }, JWT_SECRET, { expiresIn: '1d' });
+      res.json({ token, user: { id: data.user.id, email } });
+    } catch (error: any) {
+      res.status(401).json({ error: error.message });
+    }
+  });
+
+  // Portal Plans
+  app.get('/api/portal/plans', async (req, res) => {
+    try {
+      const { data: plans, error } = await supabaseAdmin.from('license_plans')
+        .select('*')
+        .is('deleted_at', null)
+        .eq('status', 'ACTIVE')
+        .order('validity_days', { ascending: true });
+
+      if (error) throw error;
+      res.json({ plans: plans || [] });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Portal Me
+  app.get('/api/portal/me', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+      const token = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const userId = decoded.id;
+      
+      const { data: user, error } = await supabaseAdmin.from('profiles').select('*').eq('id', userId).single();
+      
+      if (error || !user) {
+          return res.status(404).json({ error: 'User not found' });
+      }
+      
+      let providerName = 'Sistema';
+      if (user.parent_id) {
+        const { data: pData } = await supabaseAdmin.from('profiles').select('full_name, role').eq('id', user.parent_id).single();
+        if (pData) providerName = pData.full_name || pData.role;
+      }
+
+      const { data: licenses } = await supabaseAdmin.from('licenses').select('*, plan:license_plans(*)').eq('end_user_id', user.id);
+      
+      let allDevices: any[] = [];
+      let serverMapByLicense: Record<string, string[]> = {};
+
+      if (licenses && licenses.length > 0) {
+          const licenseIds = licenses.map((l: any) => l.id);
+          const { data: devices } = await supabaseAdmin.from('license_devices').select('*').in('license_id', licenseIds);
+          allDevices = devices || [];
+
+          const { data: lServers } = await supabaseAdmin.from('license_servers').select('license_id, server_id').in('license_id', licenseIds);
+          
+          if (lServers && lServers.length > 0) {
+            const serverIds = Array.from(new Set(lServers.map((ls: any) => ls.server_id)));
+            const { data: iptvSrvs } = await supabaseAdmin.from('iptv_servers').select('*').in('id', serverIds).is('deleted_at', null);
+            
+            const iptvMap: Record<string, any> = {};
+            if (iptvSrvs) {
+              iptvSrvs.forEach((s: any) => { iptvMap[s.id] = s; });
+            }
+
+            lServers.forEach((ls: any) => {
+              if (!serverMapByLicense[ls.license_id]) {
+                serverMapByLicense[ls.license_id] = [];
+              }
+              const srvObj = iptvMap[ls.server_id];
+              if (srvObj && srvObj.url) {
+                serverMapByLicense[ls.license_id].push(srvObj.url);
+              }
+            });
+          }
+      }
+      
+      // Map licenses to match CustomerPortal format
+      const formattedLicenses = (licenses || []).map((lic: any) => {
+          const licServers = serverMapByLicense[lic.id] || [];
+          const daysRemaining = Math.max(0, Math.ceil((new Date(lic.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+          
+          return {
+            id: lic.id,
+            uuid: lic.id,
+            code6Char: lic.code,
+            code: lic.code,
+            planName: lic.plan ? lic.plan.name : 'Plano de Licença',
+            planId: lic.plan_id,
+            expiresAt: new Date(lic.expires_at).toLocaleDateString('pt-BR'),
+            status: lic.status,
+            devicesAllowed: lic.devices_allowed || (lic.plan ? lic.plan.devices_allowed : 1),
+            maxServers: lic.max_servers || (lic.plan ? lic.plan.max_servers : 1),
+            linkedDns: licServers.join(', ') || 'Nenhum DNS vinculado',
+            dnsList: licServers,
+            isTrial: lic.status === 'TRIAL',
+            daysRemaining,
+            origin: lic.origin || user.role || 'SUPER_ADMIN',
+            originName: providerName,
+            createdAt: new Date(lic.created_at).toLocaleDateString('pt-BR')
+          };
+      });
+
+      // Format devices for CustomerPortal
+      const formattedDevices = allDevices.map((d: any) => ({
+        id: d.id,
+        deviceId: d.device_id,
+        deviceName: d.device_name || 'Smart TV / Android Device',
+        platform: d.platform || 'Android TV',
+        model: d.model || 'Standard',
+        appVersion: d.app_version || '1.0.0',
+        lastAccess: d.last_seen_at ? new Date(d.last_seen_at).toLocaleString('pt-BR') : 'Sem registro',
+        status: 'Ativo',
+        linkedLicenseCode: licenses?.find(l => l.id === d.license_id)?.code || ''
+      }));
+      
+      res.json({
+        user: {
+          id: user.id,
+          name: user.full_name || 'Cliente',
+          email: user.email || '',
+          phone: user.phone || '',
+          origin: user.role === 'END_USER' ? (licenses?.[0]?.origin || 'SUPER_ADMIN') : user.role,
+          originName: providerName,
+          code: licenses?.[0]?.code || '',
+          createdAt: new Date(user.created_at).toLocaleDateString('pt-BR')
+        },
+        licenses: formattedLicenses,
+        devices: formattedDevices,
+        purchases: []
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Portal Change Password
+  app.post('/api/portal/change-password', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return res.status(401).json({ error: 'Não autorizado' });
+      const token = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      if (!decoded.id) return res.status(401).json({ error: 'Token inválido' });
+
+      const { newPassword } = req.body;
+      if (!newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: 'A nova senha deve ter no mínimo 6 caracteres.' });
+      }
+
+      const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(decoded.id, {
+        password: newPassword
+      });
+
+      if (updateErr) throw updateErr;
+
+      res.json({ success: true, message: 'Senha alterada com sucesso!' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Erro ao alterar senha.' });
+    }
+  });
+
+  // Portal Manage DNS
+  app.post('/api/portal/manage-dns', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return res.status(401).json({ error: 'Não autorizado' });
+      const token = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+
+      const { licenseId, serverUrl, username, password, name } = req.body;
+      if (!licenseId || !serverUrl || !serverUrl.trim()) {
+        return res.status(400).json({ error: 'Licença e URL do Servidor são obrigatórios.' });
+      }
+
+      // Automatically parse and extract Xtream credentials and base URL
+      const parsed = parseServerInput(serverUrl, username, password);
+      if (!parsed || !parsed.baseUrl) {
+        return res.status(400).json({ error: 'URL do servidor inválida.' });
+      }
+
+      const cleanBaseUrl = parsed.baseUrl;
+      const connType = parsed.connectionType; // 'XTREAM_MANUAL' or 'M3U'
+      const finalUser = parsed.username || null;
+      const finalPass = parsed.password || null;
+
+      const { data: license, error: licErr } = await supabaseAdmin.from('licenses').select('*, plan:license_plans(*)').eq('id', licenseId).single();
+      if (licErr || !license) {
+        return res.status(404).json({ error: 'Licença não encontrada.' });
+      }
+
+      if (license.end_user_id !== decoded.id && license.owner_id !== decoded.id) {
+        return res.status(403).json({ error: 'Licença não pertence ao seu usuário.' });
+      }
+
+      // Check origin rules
+      const originUpper = (license.origin || '').toUpperCase();
+      if (originUpper.includes('RESELLER') || originUpper.includes('REVENDA') || originUpper.includes('PROVIDER') || originUpper.includes('PROVEDOR')) {
+        return res.status(403).json({
+          error: 'Sua licença foi emitida por uma Revenda/Provedor e não permite inclusão manual de servidores.'
+        });
+      }
+
+      // Check server count against plan max_servers
+      const maxServers = license.max_servers || license.plan?.max_servers || 1;
+      const { data: existingServers } = await supabaseAdmin.from('license_servers').select('*').eq('license_id', licenseId);
+      
+      if ((existingServers?.length || 0) >= maxServers) {
+        return res.status(400).json({ error: `Sua licença permite no máximo ${maxServers} servidor(es) DNS.` });
+      }
+
+      // Create or locate server row in iptv_servers
+      let serverId: string;
+      let serverData: any = null;
+
+      // Locate existing server matching base URL and username
+      let query = supabaseAdmin.from('iptv_servers').select('*').eq('url', cleanBaseUrl).is('deleted_at', null);
+      if (finalUser) {
+        query = query.eq('username', finalUser);
+      }
+      const { data: existingSrv } = await query.limit(1);
+
+      if (existingSrv && existingSrv.length > 0) {
+        serverId = existingSrv[0].id;
+        serverData = existingSrv[0];
+      } else {
+        const { data: newSrv, error: srvErr } = await supabaseAdmin.from('iptv_servers').insert({
+          name: name || (connType === 'M3U' ? 'Servidor M3U' : 'Servidor Xtream'),
+          url: cleanBaseUrl,
+          username: finalUser,
+          password: finalPass,
+          connection_type: connType,
+          owner_id: decoded.id,
+          status: 'ACTIVE'
+        }).select().single();
+
+        if (srvErr) throw srvErr;
+        serverId = newSrv.id;
+        serverData = newSrv;
+      }
+
+      // Link to license in license_servers
+      const { error: linkErr } = await supabaseAdmin.from('license_servers').insert({
+        license_id: licenseId,
+        server_id: serverId
+      });
+
+      if (linkErr) {
+        if (linkErr.code === '23505') {
+          return res.status(400).json({ error: 'Este servidor já está vinculado a esta licença.' });
+        }
+        throw linkErr;
+      }
+
+      // Verify link creation
+      const { data: verifiedLink } = await supabaseAdmin
+        .from('license_servers')
+        .select('*')
+        .eq('license_id', licenseId)
+        .eq('server_id', serverId)
+        .single();
+
+      if (!verifiedLink) {
+        return res.status(500).json({ error: 'Falha ao confirmar o vínculo do servidor no banco de dados.' });
+      }
+
+      res.json({
+        success: true,
+        message: 'Servidor DNS vinculado com sucesso à sua licença!',
+        server: serverData,
+        extracted: {
+          baseUrl: cleanBaseUrl,
+          username: finalUser,
+          password: finalPass,
+          type: parsed.type,
+          output: parsed.output,
+          connectionType: connType
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Erro ao cadastrar servidor DNS.' });
+    }
+  });
+
+  // Portal Remove Device
+  app.post('/api/portal/remove-device', async (req, res) => {
+      try {
+          const { deviceId } = req.body;
+          const { error } = await supabaseAdmin.from('license_devices').delete().eq('id', deviceId);
+          if (error) throw new Error(error.message);
+          res.json({ success: true });
+      } catch (err: any) {
+          res.status(500).json({ error: err.message });
+      }
+  });
+
+  // Mock Content for TV Simulator
+  app.get('/api/content/channels', (req, res) => {
+      res.json([
+          { id: 'c1', name: 'Canal 1', group: 'Esportes', icon: '' },
+          { id: 'c2', name: 'Canal 2', group: 'Filmes', icon: '' },
+      ]);
+  });
+  app.get('/api/content/movies', (req, res) => {
+      res.json([
+          { id: 'm1', name: 'Filme A', year: 2023, rating: 8.5 },
+          { id: 'm2', name: 'Filme B', year: 2022, rating: 7.2 },
+      ]);
+  });
+  app.get('/api/content/series', (req, res) => {
+      res.json([
+          { id: 's1', name: 'Série X', seasons: 2 },
+          { id: 's2', name: 'Série Y', seasons: 5 },
+      ]);
+  });
+
+  // Catch-all for API to prevent HTML responses
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: 'Endpoint da API não encontrado (404)' });
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+
+  // Global error handler to ensure JSON responses for /api
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.path.startsWith('/api/')) {
+      res.status(err.status || 500).json({ error: err.message || 'Erro interno do servidor' });
+    } else {
+      next(err);
+    }
+  });
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();

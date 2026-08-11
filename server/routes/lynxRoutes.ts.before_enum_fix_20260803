@@ -1,0 +1,253 @@
+import { Router } from 'express';
+import { LynxPaymentService } from '../services/lynx/lynxPaymentService.js';
+import { LynxWebhookService } from '../services/lynx/lynxWebhookService.js';
+
+export const lynxRouter = Router();
+
+const paymentService = new LynxPaymentService();
+const webhookService = new LynxWebhookService();
+
+// POST /api/v1/lynx/order/self-service
+lynxRouter.post('/order/self-service', async (req: any, res: any) => {
+  try {
+    let { buyerId, months, quantity } = req.body;
+    const { supabaseAdmin } = await import("../supabaseAdmin.js");
+    if (buyerId === 'self_service') {
+      const { data: admin } = await supabaseAdmin.from('profiles').select('id').eq('role', 'SUPER_ADMIN').limit(1).single();
+      buyerId = admin ? admin.id : buyerId;
+    }
+    let validity = 30;
+    if (months === 12) validity = 365;
+    if (months === 24) validity = 730;
+    if (months === 36) validity = 1095;
+    
+    const { data: plan } = await supabaseAdmin.from('license_plans').select('*').eq('validity_days', validity).limit(1).single();
+    if (!plan) throw new Error("Plano não encontrado para esta duração");
+
+    // multiply price by quantity
+    const total_price = plan.self_service_price * (quantity || 1);
+    
+    const order = await paymentService.createOrder(
+      buyerId,
+      'SELF_SERVICE_LICENSE',
+      plan.id, // reference_id
+      total_price,
+      0, // credits
+      `Licença: ${plan.name} x${quantity || 1}`
+    );
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/v1/lynx/order/reseller-credits
+lynxRouter.post('/order/reseller-credits', async (req: any, res: any) => {
+  try {
+    const { buyerId, credits, price } = req.body;
+    const order = await paymentService.createResellerCreditOrder(buyerId, credits, price);
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/v1/lynx/order/provider-subscription
+lynxRouter.post('/order/provider-subscription', async (req: any, res: any) => {
+  try {
+    const { buyerId, planId, isFirstTime } = req.body;
+    const order = await paymentService.createProviderSubscriptionOrder(buyerId, planId, isFirstTime);
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/v1/lynx/order/:id
+lynxRouter.get('/order/:id', async (req: any, res: any) => {
+  try {
+    const userId = req.user?.id || req.query.userId;
+    const order = await paymentService.getOrderStatus(req.params.id, userId);
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/v1/lynx/webhook
+lynxRouter.post('/webhook', async (req: any, res: any) => {
+  try {
+    const signature = req.headers['x-lynx-signature'] || null;
+    await webhookService.handleWebhook(req.body, signature);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('Webhook error:', err instanceof Error ? err.message : 'Unknown error');
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/lynx/login (used by App / TVSimulator)
+lynxRouter.post('/login', async (req: any, res: any) => {
+  try {
+    const { licenseCode, username, password, deviceId } = req.body;
+    if (!licenseCode || !username || !password) {
+      return res.status(400).json({ success: false, error: 'Credenciais incompletas.' });
+    }
+    
+    const { supabaseAdmin } = await import("../supabaseAdmin.js");
+    
+    // 1. Localizar licença pelo código
+    const { data: license, error: licError } = await supabaseAdmin.from('licenses')
+      .select('*, plan:license_plans(*), profiles:end_user_id(*)')
+      .eq('code', licenseCode)
+      .single();
+      
+    if (licError || !license) {
+      return res.status(401).json({ success: false, error: 'Licença inválida ou não encontrada.' });
+    }
+    
+    // 2. Confirmar status (TRIAL ou ACTIVE são permitidos para login)
+    const allowedStatuses = ['ACTIVE', 'TRIAL'];
+    if (!allowedStatuses.includes(license.status)) {
+      if (license.status === 'EXPIRED') {
+        return res.status(401).json({ success: false, error: 'Licença expirada.' });
+      }
+      if (license.status === 'BLOCKED' || license.status === 'SUSPENDED') {
+        return res.status(401).json({ success: false, error: 'Licença bloqueada ou suspensa.' });
+      }
+      if (license.status === 'CANCELLED') {
+        return res.status(401).json({ success: false, error: 'Licença cancelada.' });
+      }
+      return res.status(401).json({ success: false, error: 'Sua licença não está ativa.' });
+    }
+    
+    // 3. Confirmar validade
+    if (license.expires_at && new Date(license.expires_at) < new Date()) {
+      return res.status(401).json({ success: false, error: 'Licença expirada.' });
+    }
+    
+    // 4. Localizar usuário e 5. Validar Username/Senha
+    const userProfile = license.profiles;
+    if (userProfile && userProfile.email) {
+      const { data: authData, error: authError } = await supabaseAdmin.auth.signInWithPassword({
+        email: userProfile.email,
+        password: password
+      });
+      if (authError) {
+        return res.status(401).json({ success: false, error: 'Senha incorreta.' });
+      }
+    } else {
+      const { data: authData, error: authErr } = await supabaseAdmin.auth.signInWithPassword({
+        email: username.includes('@') ? username : username + '@streamflix.local',
+        password: password
+      });
+      if (authErr || !authData.user) {
+        return res.status(401).json({ success: false, error: 'Credenciais inválidas.' });
+      }
+    }
+    
+    // 6. Validar limite de dispositivos e registrar dispositivo
+    const maxDevs = license.devices_allowed || license.plan?.devices_allowed || 1;
+    const { data: devices } = await supabaseAdmin.from('license_devices').select('*').eq('license_id', license.id);
+    const existingDevices = devices || [];
+    const activeDeviceId = deviceId || `DEV-${username}-${Date.now().toString().slice(-4)}`;
+    let currentDevice = existingDevices.find(d => d.device_id === activeDeviceId);
+
+    if (!currentDevice) {
+      if (existingDevices.length >= maxDevs) {
+        return res.status(403).json({
+          success: false,
+          error: `Esta licença atingiu o limite de ${maxDevs} dispositivo(s) permitido(s).`
+        });
+      }
+      const { data: newDev } = await supabaseAdmin.from('license_devices').insert([{
+        license_id: license.id,
+        device_id: activeDeviceId,
+        device_name: 'Smart TV / App Device',
+        platform: 'Android TV',
+        first_seen_at: new Date().toISOString(),
+        last_seen_at: new Date().toISOString()
+      }]).select().single();
+      currentDevice = newDev;
+    } else {
+      await supabaseAdmin.from('license_devices')
+        .update({ last_seen_at: new Date().toISOString() })
+        .eq('id', currentDevice.id);
+    }
+
+    // 7 & 8. Carregar DNS vinculados à licença (ou fallback)
+    const { data: licServers } = await supabaseAdmin.from('license_servers')
+      .select('server_id')
+      .eq('license_id', license.id);
+
+    let serversList: any[] = [];
+    if (licServers && licServers.length > 0) {
+      const serverIds = licServers.map(ls => ls.server_id);
+      const { data: srvs } = await supabaseAdmin.from('iptv_servers')
+        .select('id, name, url, connection_type')
+        .in('id', serverIds)
+        .is('deleted_at', null);
+      serversList = srvs || [];
+    }
+
+    if (serversList.length === 0 && license.owner_id) {
+      const { data: ownerSrvs } = await supabaseAdmin.from('iptv_servers')
+        .select('id, name, url, connection_type')
+        .eq('owner_id', license.owner_id)
+        .is('deleted_at', null);
+      serversList = ownerSrvs || [];
+    }
+
+    if (serversList.length === 0) {
+      const { data: sysSrvs } = await supabaseAdmin.from('iptv_servers')
+        .select('id, name, url, connection_type')
+        .is('deleted_at', null)
+        .limit(3);
+      serversList = sysSrvs || [];
+    }
+
+    if (serversList.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Nenhum servidor está disponível para esta conta. Entre em contato com seu provedor.'
+      });
+    }
+
+    const safeServers = serversList.map((s, index) => ({
+      id: s.id,
+      display_name: s.name || `Servidor ${index + 1}`,
+      url: s.url,
+      connection_type: s.connection_type || 'CUSTOM'
+    }));
+
+    const expiresAtDate = new Date(license.expires_at);
+    const now = new Date();
+    const diffTime = expiresAtDate.getTime() - now.getTime();
+    const daysRemaining = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    const isTrial = license.status === 'TRIAL';
+
+    res.json({
+      success: true,
+      servers: safeServers,
+      user: {
+        id: userProfile?.id || license.end_user_id,
+        name: userProfile?.full_name || username,
+        expires_at: license.expires_at,
+        isTrial,
+        status: license.status,
+        daysRemaining
+      },
+      license: {
+        code: license.code,
+        status: license.status,
+        isTrial,
+        expires_at: license.expires_at,
+        days_remaining: daysRemaining,
+        max_devices: maxDevs,
+        used_devices: currentDevice ? existingDevices.length : existingDevices.length + 1
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});

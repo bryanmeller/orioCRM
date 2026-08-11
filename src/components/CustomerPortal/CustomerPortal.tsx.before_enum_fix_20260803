@@ -1,0 +1,1696 @@
+import React, { useState, useEffect } from 'react';
+import {
+  User,
+  Key,
+  ShoppingCart,
+  RefreshCw,
+  Smartphone,
+  History,
+  Lock,
+  LogOut,
+  Sparkles,
+  QrCode,
+  Copy,
+  Check,
+  CheckCircle2,
+  AlertCircle,
+  Clock,
+  ShieldCheck,
+  Globe,
+  Plus,
+  Trash2,
+  Power,
+  ChevronRight,
+  Tv,
+  ArrowRight,
+  Search,
+  ExternalLink,
+  CreditCard,
+  Building2,
+  Coins,
+  Server
+} from 'lucide-react';
+
+// End-User License Interface (MÓDULO 18 - SPRINT 1.1 HOMOLOGADO)
+export interface EndUserLicense {
+  id: string;
+  uuid?: string;
+  code6Char: string; // ex: A82KQ9
+  code?: string;
+  planName: string;
+  durationMonths?: number;
+  status: 'TRIAL' | 'ACTIVE' | 'EXPIRED' | 'BLOCKED' | 'CANCELLED';
+  expiresAt: string;
+  createdAt?: string;
+  deviceId?: string;
+  deviceMac?: string;
+  linkedDns?: string;
+  dnsList?: string[];
+  devicesAllowed?: number;
+  maxServers?: number;
+  origin?: 'SUPER_ADMIN' | 'PROVIDER' | 'RESELLER' | 'SUB_RESELLER' | 'SELF_SERVICE' | string;
+  originName?: string;
+  daysRemaining?: number;
+}
+
+// Device Record Interface
+export interface UserDeviceItem {
+  id: string;
+  deviceName: string;
+  deviceId: string;
+  macAddress?: string;
+  lastAccess: string;
+  status: 'Ativo' | 'Inativo' | 'Bloqueado';
+  linkedLicenseCode: string;
+}
+
+// Purchase Record Interface
+export interface PurchaseRecord {
+  id: string;
+  orderNumber: string;
+  date: string;
+  planName: string;
+  months: number;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  status: 'PAGO' | 'AGUARDANDO_PIX' | 'CANCELADO';
+  pixCopyPaste: string;
+  generatedCodes: string[];
+}
+
+// Helper: Calculate remaining days from date string (DD/MM/YYYY or YYYY-MM-DD or ISO)
+const calculateDaysRemaining = (expiresAtStr: string): number => {
+  if (!expiresAtStr) return 0;
+
+  let targetDate: Date | null = null;
+
+  if (expiresAtStr.includes('/')) {
+    const parts = expiresAtStr.split('/');
+    if (parts.length === 3) {
+      targetDate = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]));
+    }
+  } else {
+    const parsed = new Date(expiresAtStr);
+    if (!isNaN(parsed.getTime())) {
+      targetDate = parsed;
+    }
+  }
+
+  if (!targetDate || isNaN(targetDate.getTime())) return 0;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  targetDate.setHours(0, 0, 0, 0);
+
+  const diffTime = targetDate.getTime() - today.getTime();
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+};
+
+// Helper: Friendly Origin Label
+const getFriendlyOrigin = (origin?: string, originName?: string): string => {
+  if (!origin) return originName && originName !== 'Sistema' ? `Criada por ${originName}` : 'Criada pelo Sistema';
+
+  const norm = origin.toUpperCase();
+  if (norm.includes('SUPER_ADMIN') || norm.includes('SYSTEM') || norm.includes('SISTEMA')) {
+    return 'Criada pelo Sistema';
+  }
+  if (norm.includes('PROVIDER') || norm.includes('PROVEDOR')) {
+    return originName && originName !== 'Sistema' ? `Criada pelo Provedor (${originName})` : 'Criada pelo Provedor';
+  }
+  if (norm.includes('SUB_RESELLER') || norm.includes('SUB_REVENDA')) {
+    return originName ? `Criada pela Sub-Revenda (${originName})` : 'Criada pela Sub-Revenda';
+  }
+  if (norm.includes('RESELLER') || norm.includes('REVENDA')) {
+    return originName ? `Criada pela Revenda (${originName})` : 'Criada pela Revenda';
+  }
+  if (norm.includes('SELF_SERVICE') || norm.includes('PORTAL')) {
+    return 'Ativada no Portal';
+  }
+  return originName ? `Criada por ${originName}` : `Criada via ${origin}`;
+};
+
+// Helper: Days remaining badge styling
+const getDaysRemainingBadgeStyle = (days: number): string => {
+  if (days <= 0) {
+    return 'bg-red-500/20 text-red-400 border border-red-500/40';
+  }
+  if (days === 1) {
+    return 'bg-red-500/25 text-red-300 border border-red-500/50 font-extrabold shadow-sm shadow-red-900/50';
+  }
+  if (days <= 3) {
+    return 'bg-orange-500/20 text-orange-400 border border-orange-500/40 font-bold';
+  }
+  if (days <= 7) {
+    return 'bg-amber-500/20 text-amber-400 border border-amber-500/30 font-semibold';
+  }
+  return 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+};
+
+export const CustomerPortal: React.FC = () => {
+  // Authentication State for Customer Portal
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [token, setToken] = useState<string>('');
+  const [authMode, setAuthMode] = useState<'LOGIN' | 'REGISTER'>('LOGIN');
+
+  // Login Form
+  const [loginEmail, setLoginEmail] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+
+  // Register Form
+  const [regName, setRegName] = useState<string>('');
+  const [regEmail, setRegEmail] = useState<string>('');
+  const [regPhone, setRegPhone] = useState<string>('');
+  const [regPassword, setRegPassword] = useState<string>('');
+
+  // Active Menu Tab
+  const [activeTab, setActiveTab] = useState<
+    | 'account'
+    | 'licenses'
+    | 'buy-license'
+    | 'renew-license'
+    | 'devices'
+    | 'history'
+    | 'change-password'
+  >('licenses');
+
+  // Customer Profile Info
+  const [customerUser, setCustomerUser] = useState({
+    id: 'cli-8842',
+    name: 'Carlos Silva',
+    email: 'carlos.silva@email.com',
+    phone: '(11) 98765-4321',
+    origin: 'PROVEDOR' as 'PROVEDOR' | 'REVENDA',
+    originName: 'StreamFlix Media Group',
+    code: '100',
+    createdAt: '15/01/2026',
+  });
+
+  // Toast Notification State
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // License & Devices States
+  const [licenses, setLicenses] = useState<EndUserLicense[]>([]);
+  const [devices, setDevices] = useState<any[]>([]);
+  const [purchases, setPurchases] = useState<PurchaseRecord[]>([]);
+
+  // Purchase Form State
+  const [buyPlanMonths, setBuyPlanMonths] = useState<number>(12);
+  const [buyQuantity, setBuyQuantity] = useState<number>(1);
+  const [activePixOrder, setActivePixOrder] = useState<PurchaseRecord | null>(null);
+  const [isProcessingPix, setIsProcessingPix] = useState<boolean>(false);
+  const [copiedPix, setCopiedPix] = useState<boolean>(false);
+
+  // License Renewal / Activation State
+  const [selectedLicenseToRenew, setSelectedLicenseToRenew] = useState<string>('');
+  const [renewMonths, setRenewMonths] = useState<number>(12);
+
+  // Change Password Form State
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
+  // Modal State for Adding DNS Server
+  const [showDnsModal, setShowDnsModal] = useState<boolean>(false);
+  const [selectedLicForDns, setSelectedLicForDns] = useState<EndUserLicense | null>(null);
+  const [newDnsInput, setNewDnsInput] = useState<string>('');
+  const [availablePlans, setAvailablePlans] = useState<any[]>([]);
+
+  const loadPortalData = async () => {
+    if (!isAuthenticated || !token) return;
+    try {
+      const res = await fetch('/api/portal/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.user) {
+        setCustomerUser({
+          id: data.user.id,
+          name: data.user.name || data.user.username,
+          email: data.user.email || '',
+          phone: data.user.phone || '',
+          origin: data.user.originType || data.user.origin || 'SELF_SERVICE',
+          originName: data.user.providerName || 'Sistema',
+          code: data.user.code || data.user.licenseCode || '',
+          createdAt: data.user.createdAt || data.user.created_at || new Date().toISOString(),
+        });
+      }
+      if (data.licenses) {
+        setLicenses(data.licenses);
+        if (data.licenses.length > 0 && !selectedLicenseToRenew) {
+          setSelectedLicenseToRenew(data.licenses[0].id);
+        }
+      }
+      if (data.devices) setDevices(data.devices);
+      if (data.purchases) setPurchases(data.purchases);
+    } catch {
+      // Silent catch
+    }
+  };
+
+  useEffect(() => {
+    if (isAuthenticated && token) {
+      loadPortalData();
+      fetch('/api/portal/plans')
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.plans) setAvailablePlans(data.plans);
+        })
+        .catch(() => {});
+    }
+  }, [isAuthenticated, token]);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const canAddServer = (origin?: string) => {
+    if (!origin) return true;
+    const o = origin.toUpperCase();
+    return o === 'SYSTEM' || o === 'SELF_SERVICE' || o === 'SUPER_ADMIN' || o === 'ADMIN' || o === 'CLIENTE_AVULSO';
+  };
+
+  const getEmptyServerText = (origin?: string, maxServers: number = 1) => {
+    if (!origin) return `Você pode cadastrar até ${maxServers} servidor(es).`;
+    const o = origin.toUpperCase();
+    if (o === 'SYSTEM' || o === 'SELF_SERVICE' || o === 'SUPER_ADMIN' || o === 'ADMIN' || o === 'CLIENTE_AVULSO') {
+      return `Você pode cadastrar até ${maxServers} servidor(es).`;
+    }
+    if (o === 'RESELLER' || o === 'REVENDA') {
+      return 'Servidores fornecidos pela sua Revenda.';
+    }
+    if (o === 'SUB_RESELLER' || o === 'SUBREVENDA') {
+      return 'Servidores fornecidos pela sua Sub-Revenda.';
+    }
+    return 'Servidores fornecidos pelo seu Provedor.';
+  };
+
+  // 6-Character Unique Alphanumeric Generator
+  const generate6CharAlphanumericCode = (): string => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+  };
+
+  // Helper calculation for prices using commercial plans
+  const getUnitPriceForMonths = (months: number): number => {
+    if (availablePlans && availablePlans.length > 0) {
+      const targetDays = months === 12 ? 365 : months === 24 ? 730 : months === 36 ? 1095 : months * 30;
+      const foundPlan = availablePlans.find((p) => p.validity_days === targetDays);
+      if (foundPlan && foundPlan.self_service_price) {
+        return Number(foundPlan.self_service_price);
+      }
+    }
+    if (months === 12) return 199.00;
+    if (months === 24) return 349.00;
+    if (months === 36) return 489.00;
+    return 199.00;
+  };
+
+  // Login Handler
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginEmail.trim() || !loginPassword.trim()) {
+      showToast('Por favor, preencha todos os campos para entrar.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/portal/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail.trim(), password: loginPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Erro no login.');
+        return;
+      }
+
+      const user = data.user;
+      setCustomerUser({
+        id: user.id || 'cli-new',
+        name: user.name || 'Cliente',
+        email: user.email || '',
+        phone: user.phone || '',
+        origin: user.originType || user.origin || 'SELF_SERVICE',
+        originName: user.providerName || 'Sistema',
+        code: user.code || user.licenseCode || '',
+        createdAt: user.createdAt || new Date().toISOString(),
+      });
+
+      setToken(data.token);
+      setIsAuthenticated(true);
+      showToast(`Bem-vindo de volta!`);
+    } catch (err: any) {
+      showToast(err.message || 'Erro na conexão.');
+    }
+  };
+
+  // Register Handler
+  const handleRegisterSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!regName.trim() || !regEmail.trim() || !regPassword.trim()) {
+      showToast('Por favor, preencha os campos obrigatórios (Nome, E-mail e Senha).');
+      return;
+    }
+
+    setCustomerUser({
+      id: `cli-${Date.now().toString().slice(-4)}`,
+      name: regName.trim(),
+      email: regEmail.trim(),
+      phone: regPhone.trim() || '(Não informado)',
+      origin: 'PROVEDOR',
+      originName: 'StreamFlix Media Group',
+      code: '100',
+      createdAt: new Date().toLocaleDateString('pt-BR'),
+    });
+
+    setIsAuthenticated(true);
+    showToast('Conta criada com sucesso! Você já está autenticado.');
+  };
+
+  // Check if trial license exists
+  const trialLicense = licenses.find((l) => l.status === 'TRIAL');
+
+  // Handle top bar "Comprar Licença" click: if Trial exists, activate it directly!
+  const handleBuyOrActivateNavigation = () => {
+    if (trialLicense) {
+      setSelectedLicenseToRenew(trialLicense.id);
+      setActiveTab('renew-license');
+      showToast(`Ativando sua assinatura em Teste Gratuito (Código ${trialLicense.code6Char})`);
+    } else {
+      setActiveTab('buy-license');
+    }
+  };
+
+  // Handle New License Purchase Creation -> Lynx PIX
+  const handleCreatePurchase = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // If trial license exists, redirect to activation of that trial license
+    if (trialLicense) {
+      setSelectedLicenseToRenew(trialLicense.id);
+      setActiveTab('renew-license');
+      showToast(`Você possui uma assinatura em Teste Gratuito. Ativando a licença ${trialLicense.code6Char}...`);
+      return;
+    }
+
+    const price = getUnitPriceForMonths(buyPlanMonths);
+    const total = price * buyQuantity;
+
+    const newOrder: PurchaseRecord = {
+      id: `ord-${Date.now().toString().slice(-4)}`,
+      orderNumber: `ORD-${Math.floor(100000 + Math.random() * 900000)}`,
+      date: new Date().toLocaleString('pt-BR'),
+      planName: `Assinatura StreamFlix (${buyPlanMonths} Meses)`,
+      months: buyPlanMonths,
+      quantity: buyQuantity,
+      unitPrice: price,
+      totalPrice: total,
+      status: 'AGUARDANDO_PIX',
+      pixCopyPaste: '00020126580014BR.GOV.BCB.PIX0136stf-license-buy-pix-key',
+      generatedCodes: [],
+    };
+
+    setActivePixOrder(newOrder);
+    showToast(`Pedido PIX gerado! Faça o pagamento para liberar suas assinaturas.`);
+  };
+
+  // Handle Simulate Lynx PIX Webhook Payment Callback
+  const handleSimulateLynxPixPayment = () => {
+    if (!activePixOrder) return;
+    setIsProcessingPix(true);
+
+    setTimeout(() => {
+      const newGeneratedCodes: string[] = [];
+      const newCreatedLicenses: EndUserLicense[] = [];
+
+      for (let i = 0; i < activePixOrder.quantity; i++) {
+        const code6 = generate6CharAlphanumericCode();
+        newGeneratedCodes.push(code6);
+
+        const expDate = new Date();
+        expDate.setMonth(expDate.getMonth() + activePixOrder.months);
+
+        const newLic: EndUserLicense = {
+          id: `lic-${Date.now() + i}`,
+          uuid: crypto.randomUUID(),
+          code6Char: code6,
+          planName: activePixOrder.planName,
+          durationMonths: activePixOrder.months,
+          status: 'ACTIVE',
+          expiresAt: expDate.toLocaleDateString('pt-BR'),
+          createdAt: new Date().toLocaleDateString('pt-BR'),
+          linkedDns: 'https://cdn.streamflix-provider.com',
+          dnsList: ['https://cdn.streamflix-provider.com'],
+          devicesAllowed: 1,
+          maxServers: 3,
+          origin: customerUser.origin,
+          originName: customerUser.originName,
+        };
+
+        newCreatedLicenses.push(newLic);
+      }
+
+      setPurchases((prev) =>
+        prev.map((p) =>
+          p.id === activePixOrder.id
+            ? { ...p, status: 'PAGO', generatedCodes: newGeneratedCodes }
+            : p
+        )
+      );
+
+      setLicenses((prev) => [...newCreatedLicenses, ...prev]);
+
+      setIsProcessingPix(false);
+      setActivePixOrder(null);
+      setActiveTab('licenses');
+      showToast(`Pagamento PIX confirmado! ${activePixOrder.quantity} assinatura(s) ativada(s) automaticamente.`);
+    }, 1500);
+  };
+
+  // Handle License Renewal / Trial Activation via Lynx PIX
+  const handleRenewLicenseSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetLic = licenses.find((l) => l.id === selectedLicenseToRenew);
+    if (!targetLic) {
+      showToast('Selecione uma assinatura válida para continuar.');
+      return;
+    }
+
+    const price = getUnitPriceForMonths(renewMonths);
+    const isActivatingTrial = targetLic.status === 'TRIAL';
+
+    // Update license expiration & status (RETAIN SAME ALPHANUMERIC CODE AND ID!)
+    setLicenses((prev) =>
+      prev.map((lic) => {
+        if (lic.id === targetLic.id) {
+          let currDate = new Date();
+
+          if (!isActivatingTrial && lic.expiresAt) {
+            const expParts = lic.expiresAt.split('/');
+            if (expParts.length === 3) {
+              const parsed = new Date(Number(expParts[2]), Number(expParts[1]) - 1, Number(expParts[0]));
+              if (parsed > new Date()) {
+                currDate = parsed;
+              }
+            }
+          }
+
+          currDate.setMonth(currDate.getMonth() + renewMonths);
+
+          return {
+            ...lic,
+            durationMonths: (lic.durationMonths || 0) + renewMonths,
+            status: 'ACTIVE',
+            expiresAt: currDate.toLocaleDateString('pt-BR'),
+          };
+        }
+        return lic;
+      })
+    );
+
+    const renewalRecord: PurchaseRecord = {
+      id: `ord-${Date.now().toString().slice(-4)}`,
+      orderNumber: `${isActivatingTrial ? 'ACTIVATE' : 'RENEW'}-${targetLic.code6Char}-${Math.floor(100 + Math.random() * 900)}`,
+      date: new Date().toLocaleString('pt-BR'),
+      planName: `${isActivatingTrial ? 'Ativação' : 'Renovação'} de Assinatura (${renewMonths} Meses) - ${targetLic.code6Char}`,
+      months: renewMonths,
+      quantity: 1,
+      unitPrice: price,
+      totalPrice: price,
+      status: 'PAGO',
+      pixCopyPaste: '00020126580014BR.GOV.BCB.PIX0136stf-renew-pix-key',
+      generatedCodes: [targetLic.code6Char],
+    };
+
+    setPurchases([renewalRecord, ...purchases]);
+    setActiveTab('licenses');
+    showToast(
+      isActivatingTrial
+        ? `Assinatura ${targetLic.code6Char} ativada com sucesso! Agora é uma licença Ativa (${renewMonths} meses).`
+        : `Assinatura ${targetLic.code6Char} renovada com sucesso por +${renewMonths} meses!`
+    );
+  };
+
+  // Handle Add DNS Server Submit
+  const handleAddDnsSubmit = async () => {
+    if (!newDnsInput.trim() || !selectedLicForDns) return;
+
+    const dnsToSave = newDnsInput.trim();
+
+    try {
+      const res = await fetch('/api/portal/manage-dns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ licenseId: selectedLicForDns.id, serverUrl: dnsToSave }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        showToast(data.error || 'Erro ao adicionar servidor.');
+        return;
+      }
+      showToast(data.message || `Servidor ${dnsToSave} adicionado com sucesso!`);
+      setShowDnsModal(false);
+      setNewDnsInput('');
+      setSelectedLicForDns(null);
+      await loadPortalData();
+    } catch (err: any) {
+      showToast(err.message || 'Erro de conexão ao adicionar servidor.');
+    }
+  };
+
+  // Handle Device Actions
+  const handleRemoveDevice = async (devId: string) => {
+    try {
+      const res = await fetch('/api/portal/remove-device', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ deviceId: devId }),
+      });
+      if (!res.ok) throw new Error('Erro ao remover dispositivo.');
+      setDevices((prev) => prev.filter((d) => d.id !== devId));
+      showToast('Dispositivo removido da conta com sucesso!');
+    } catch (err: any) {
+      showToast(err.message || 'Dispositivo removido.');
+    }
+  };
+
+  const handleDeactivateLicense = (licCode: string) => {
+    setLicenses((prev) =>
+      prev.map((l) =>
+        l.code6Char === licCode ? { ...l, status: 'BLOCKED', deviceId: undefined, deviceMac: undefined } : l
+      )
+    );
+    setDevices((prev) =>
+      prev.map((d) => (d.linkedLicenseCode === licCode ? { ...d, status: 'Inativo' } : d))
+    );
+    showToast(`Assinatura ${licCode} desativada do dispositivo.`);
+  };
+
+  // Handle Change Password
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPassword.length < 6) {
+      showToast('A nova senha deve ter no mínimo 6 caracteres.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      showToast('A nova senha e a confirmação não coincidem.');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/portal/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao alterar senha.');
+
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      showToast('Sua senha foi alterada com sucesso!');
+    } catch (err: any) {
+      showToast(err.message || 'Erro ao alterar senha.');
+    }
+  };
+
+  // If user is not authenticated on Customer Portal
+  if (!isAuthenticated) {
+    return (
+      <div className="w-full min-h-[calc(100vh-120px)] bg-[#000000] flex items-center justify-center p-6 font-sans">
+        {/* Toast Notification */}
+        {toastMessage && (
+          <div className="fixed top-20 right-6 z-50 bg-[#6A00FF] text-white px-5 py-3 rounded-lg shadow-sm border border-white/10 flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-top-4 duration-200">
+            <Sparkles size={16} />
+            <span>{toastMessage}</span>
+          </div>
+        )}
+
+        <div className="max-w-md w-full bg-[#000000] border border-white/10 rounded-xl p-8 shadow-xl space-y-6 relative overflow-hidden">
+          {/* Top Brand Banner */}
+          <div className="text-center space-y-2">
+            <div className="w-16 h-16 bg-white text-black rounded-2xl flex items-center justify-center mx-auto shadow-lg shadow-purple-900/30 border border-white/10">
+              <Tv size={32} className="text-black" />
+            </div>
+            <h2 className="text-2xl font-bold text-white tracking-tight uppercase">PORTAL DO CLIENTE</h2>
+            <p className="text-xs text-gray-400">Acesse e gerencie suas assinaturas e dispositivos conectados</p>
+          </div>
+
+          {/* Toggle Login vs Register */}
+          <div className="flex bg-[#000000] p-1 rounded-xl border border-white/10 text-xs font-bold">
+            <button
+              onClick={() => setAuthMode('LOGIN')}
+              className={`flex-1 py-2.5 rounded-lg transition-all cursor-pointer ${
+                authMode === 'LOGIN'
+                  ? 'bg-white text-black shadow-sm'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Entrar na Minha Conta
+            </button>
+            <button
+              onClick={() => setAuthMode('REGISTER')}
+              className={`flex-1 py-2.5 rounded-lg transition-all cursor-pointer ${
+                authMode === 'REGISTER'
+                  ? 'bg-white text-black shadow-sm'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Criar Nova Conta
+            </button>
+          </div>
+
+          {/* Login Form */}
+          {authMode === 'LOGIN' && (
+            <form onSubmit={handleLoginSubmit} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">E-mail Cadastrado</label>
+                <input
+                  type="email"
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  placeholder="seu@email.com"
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Senha de Acesso</label>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3.5 bg-white hover:bg-gray-200 text-black font-bold text-xs rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+              >
+                <span>ACESSAR PORTAL</span>
+                <ArrowRight size={16} />
+              </button>
+            </form>
+          )}
+
+          {/* Register Form */}
+          {authMode === 'REGISTER' && (
+            <form onSubmit={handleRegisterSubmit} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Nome Completo *</label>
+                <input
+                  type="text"
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
+                  placeholder="Ex: Carlos Silva"
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">E-mail *</label>
+                <input
+                  type="email"
+                  value={regEmail}
+                  onChange={(e) => setRegEmail(e.target.value)}
+                  placeholder="carlos.silva@email.com"
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Telefone WhatsApp (Opcional)</label>
+                <input
+                  type="tel"
+                  value={regPhone}
+                  onChange={(e) => setRegPhone(e.target.value)}
+                  placeholder="(11) 98765-4321"
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Senha de Acesso *</label>
+                <input
+                  type="password"
+                  value={regPassword}
+                  onChange={(e) => setRegPassword(e.target.value)}
+                  placeholder="No mínimo 6 caracteres"
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3.5 bg-white hover:bg-gray-200 text-black font-bold text-xs rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+              >
+                <Sparkles size={16} />
+                <span>CADASTRAR E CONTINUAR</span>
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Authenticated Main View
+  return (
+    <div className="w-full max-w-7xl mx-auto p-4 md:p-6 space-y-6 font-sans">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-20 right-6 z-50 bg-[#6A00FF] text-white px-5 py-3 rounded-lg shadow-md border border-white/10 flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-top-4 duration-200">
+          <Sparkles size={16} />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Top Welcome Bar */}
+      <div className="bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="w-14 h-14 rounded-xl bg-white text-black flex items-center justify-center font-bold text-xl shadow-sm border border-white/10">
+            {customerUser.name.charAt(0)}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-xl font-bold text-white tracking-tight">{customerUser.name}</h2>
+              <span className="bg-emerald-500/20 text-emerald-400 px-2.5 py-0.5 rounded-full text-[11px] font-bold border border-emerald-500/30 uppercase">
+                CLIENTE ATIVO
+              </span>
+            </div>
+            <p className="text-xs text-gray-400">{customerUser.email} • {customerUser.phone}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-end">
+          <div className="bg-[#000000] px-3.5 py-2 rounded-lg border border-white/10 text-xs text-gray-300">
+            <span className="text-[10px] text-gray-500 font-bold block uppercase tracking-wider">Origem do Cadastro:</span>
+            <strong className="text-white text-xs">{getFriendlyOrigin(customerUser.origin, customerUser.originName)}</strong>
+          </div>
+
+          <button
+            onClick={() => {
+              setIsAuthenticated(false);
+              showToast('Você saiu do Portal do Cliente.');
+            }}
+            className="px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold text-xs rounded-lg border border-red-500/30 transition-all flex items-center gap-2 cursor-pointer"
+          >
+            <LogOut size={15} />
+            <span>Sair</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Navigation Sub-Menu Tabs (SIMPLIFIED USER-FRIENDLY NAMES) */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-2 custom-scrollbar">
+        <button
+          onClick={() => setActiveTab('licenses')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'licenses'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <Key size={15} />
+          <span>Minhas Assinaturas ({licenses.length})</span>
+        </button>
+
+        <button
+          onClick={handleBuyOrActivateNavigation}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'buy-license'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <ShoppingCart size={15} />
+          <span>{trialLicense ? 'Ativar Assinatura' : 'Comprar Assinatura'}</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('renew-license')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'renew-license'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <RefreshCw size={15} />
+          <span>Renovar Assinatura</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('devices')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'devices'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <Smartphone size={15} />
+          <span>Dispositivos Conectados ({devices.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('history')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'history'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <History size={15} />
+          <span>Histórico de Compras ({purchases.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('account')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'account'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <User size={15} />
+          <span>Minha Conta</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('change-password')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+            activeTab === 'change-password'
+              ? 'bg-white text-black shadow-sm border border-white/10'
+              : 'bg-[#000000] text-gray-400 hover:text-white border border-white/10'
+          }`}
+        >
+          <Lock size={15} />
+          <span>Alterar Senha</span>
+        </button>
+      </div>
+
+      {/* TAB 1: MINHAS ASSINATURAS (CARD DA LICENÇA HOMOLOGADO) */}
+      {activeTab === 'licenses' && (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Key size={18} className="text-gray-300" />
+                <span>Minhas Assinaturas</span>
+              </h3>
+              <p className="text-xs text-gray-400">Gerencie o status, código de acesso e validade do seu serviço</p>
+            </div>
+
+            <button
+              onClick={handleBuyOrActivateNavigation}
+              className="px-4 py-2.5 bg-white hover:bg-gray-200 text-black font-bold text-xs rounded-xl shadow-sm transition-all flex items-center gap-2 cursor-pointer uppercase tracking-wider"
+            >
+              <Plus size={15} />
+              <span>{trialLicense ? 'ATIVAR ASSINATURA EXISTENTE' : 'COMPRAR NOVA ASSINATURA'}</span>
+            </button>
+          </div>
+
+          {licenses.length === 0 ? (
+            <div className="bg-[#000000] border border-white/10 rounded-xl p-8 text-center space-y-4">
+              <Key size={40} className="text-gray-500 mx-auto" />
+              <div className="space-y-1">
+                <h4 className="text-base font-bold text-white">Nenhuma assinatura encontrada</h4>
+                <p className="text-xs text-gray-400">Adquira um plano ou ative seu teste para utilizar o StreamFlix TV.</p>
+              </div>
+              <button
+                onClick={handleBuyOrActivateNavigation}
+                className="px-5 py-2.5 bg-white text-black font-bold text-xs rounded-lg shadow-sm hover:bg-gray-200 cursor-pointer"
+              >
+                COMPRAR ASSINATURA
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {licenses.map((lic) => {
+                const daysRemaining = lic.daysRemaining !== undefined ? lic.daysRemaining : calculateDaysRemaining(lic.expiresAt);
+                const linkedDevicesCount = devices.filter(
+                  (d) => d.linkedLicenseCode === lic.code6Char || d.licenseId === lic.id
+                ).length;
+                const devicesAllowed = lic.devicesAllowed || 1;
+
+                const dnsList = lic.dnsList || (lic.linkedDns && lic.linkedDns !== 'Nenhum DNS vinculado' ? lic.linkedDns.split(',').map((s) => s.trim()).filter(Boolean) : []);
+                const usedServers = dnsList.length;
+                const maxServers = lic.maxServers || 1;
+
+                return (
+                  <div
+                    key={lic.id}
+                    className="bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-4 relative overflow-hidden transition-all hover:border-white/20"
+                  >
+                    {/* 1. STATUS DA LICENÇA */}
+                    <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                      <span className="text-[11px] text-gray-400 font-bold uppercase tracking-wider">Status:</span>
+                      {lic.status === 'TRIAL' ? (
+                        <span className="px-3 py-1 rounded-full text-xs font-black bg-purple-600/30 text-purple-300 border border-purple-500/50 shadow-sm flex items-center gap-1.5 animate-pulse uppercase tracking-wider">
+                          <Sparkles size={13} className="text-purple-300" />
+                          <span>🟣 TESTE GRATUITO</span>
+                        </span>
+                      ) : lic.status === 'ACTIVE' ? (
+                        <span className="px-3 py-1 rounded-full text-xs font-extrabold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5 uppercase">
+                          <CheckCircle2 size={13} className="text-emerald-400" />
+                          <span>🟢 ATIVA</span>
+                        </span>
+                      ) : lic.status === 'EXPIRED' ? (
+                        <span className="px-3 py-1 rounded-full text-xs font-extrabold bg-red-500/20 text-red-400 border border-red-500/40 flex items-center gap-1.5 uppercase">
+                          <AlertCircle size={13} className="text-red-400" />
+                          <span>🔴 EXPIRADA</span>
+                        </span>
+                      ) : (
+                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 uppercase">
+                          🟡 {lic.status === 'BLOCKED' ? 'SUSPENSA' : 'CANCELADA'}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* 2. PLANO */}
+                    <div className="flex items-center justify-between text-xs py-1 border-b border-white/5">
+                      <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                        <Tv size={14} className="text-gray-400" />
+                        <span>Plano:</span>
+                      </span>
+                      <strong className="text-white text-xs font-bold">
+                        {lic.planName} {lic.durationMonths ? `(${lic.durationMonths} ${lic.durationMonths === 1 ? 'mês' : 'meses'})` : ''}
+                      </strong>
+                    </div>
+
+                    {/* 3. VALIDADE */}
+                    <div className="flex items-center justify-between text-xs py-1 border-b border-white/5">
+                      <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                        <Clock size={14} className="text-gray-400" />
+                        <span>Validade:</span>
+                      </span>
+                      <strong className="text-emerald-400 font-mono text-xs font-bold">{lic.expiresAt}</strong>
+                    </div>
+
+                    {/* 4. DIAS RESTANTES */}
+                    <div className="flex items-center justify-between text-xs py-1 border-b border-white/5">
+                      <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                        <Clock size={14} className="text-gray-400" />
+                        <span>Dias Restantes:</span>
+                      </span>
+                      <div className={`px-2.5 py-0.5 rounded-lg text-xs font-bold flex items-center gap-1 ${getDaysRemainingBadgeStyle(daysRemaining)}`}>
+                        {daysRemaining <= 1 && daysRemaining > 0 && <AlertCircle size={13} className="text-red-300 animate-bounce" />}
+                        <span>
+                          {daysRemaining > 0
+                            ? `Faltam ${daysRemaining} ${daysRemaining === 1 ? 'dia' : 'dias'}`
+                            : daysRemaining === 0
+                            ? 'Vence hoje!'
+                            : `Expirou há ${Math.abs(daysRemaining)} ${Math.abs(daysRemaining) === 1 ? 'dia' : 'dias'}`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* 5. CÓDIGO DA LICENÇA */}
+                    <div className="bg-white/5 border border-white/10 rounded-xl p-3.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                          <Key size={13} className="text-emerald-400" />
+                          <span>Código de Ativação:</span>
+                        </span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(lic.code6Char);
+                            showToast(`Código ${lic.code6Char} copiado para a área de transferência!`);
+                          }}
+                          className="text-[11px] text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1 bg-emerald-500/10 hover:bg-emerald-500/20 px-2.5 py-1 rounded-lg border border-emerald-500/30 transition-all cursor-pointer"
+                        >
+                          <Copy size={12} />
+                          <span>Copiar Código</span>
+                        </button>
+                      </div>
+                      <div className="text-2xl font-black text-emerald-400 font-mono tracking-widest text-center bg-[#000000] py-2.5 rounded-lg border border-emerald-500/30 shadow-inner">
+                        {lic.code6Char}
+                      </div>
+                    </div>
+
+                    {/* 6. DISPOSITIVOS (UTILIZADOS / PERMITIDOS) */}
+                    <div className="flex items-center justify-between text-xs py-1 border-b border-white/5">
+                      <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                        <Smartphone size={14} className="text-gray-400" />
+                        <span>Dispositivos:</span>
+                      </span>
+                      <strong className="text-white font-mono bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 text-xs">
+                        {linkedDevicesCount} / {devicesAllowed} dispositivos
+                      </strong>
+                    </div>
+
+                    {/* 7. SERVIDORES (DNS) (UTILIZADOS / PERMITIDOS) */}
+                    <div className="space-y-2 py-1 border-b border-white/5 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                          <Globe size={14} className="text-gray-400" />
+                          <span>Servidores (DNS):</span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <strong className="text-white font-mono bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 text-xs">
+                            {usedServers} / {maxServers} servidores
+                          </strong>
+                          {canAddServer(lic.origin) && usedServers < maxServers && (
+                            <button
+                              onClick={() => {
+                                setSelectedLicForDns(lic);
+                                setShowDnsModal(true);
+                              }}
+                              className="text-[10px] bg-white/10 hover:bg-white/20 text-white font-bold px-2 py-1 rounded border border-white/10 cursor-pointer flex items-center gap-1"
+                            >
+                              <Plus size={11} />
+                              <span>Adicionar Servidor</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {dnsList.length > 0 ? (
+                        <div className="space-y-1 pl-5">
+                          {dnsList.map((dns, idx) => (
+                            <div key={idx} className="text-xs font-mono text-gray-300 bg-white/5 px-2.5 py-1 rounded flex items-center justify-between">
+                              <span className="truncate max-w-[220px]">{dns}</span>
+                              <span className="text-[10px] text-emerald-400 font-bold">Conectado</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-gray-400 italic pl-5">
+                          {getEmptyServerText(lic.origin, maxServers)}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* 8. ORIGEM DA LICENÇA (AMIGÁVEL) */}
+                    <div className="flex items-center justify-between text-xs py-1">
+                      <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                        <Building2 size={14} className="text-gray-400" />
+                        <span>Origem:</span>
+                      </span>
+                      <span className="text-gray-300 font-medium bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 text-xs">
+                        {getFriendlyOrigin(lic.origin, lic.originName)}
+                      </span>
+                    </div>
+
+                    {/* ACTION BUTTON: RENOVAR OU ATIVAR (NUNCA RENOVAR PARA TRIAL) */}
+                    <div className="pt-2 border-t border-white/10 flex items-center justify-end">
+                      {lic.status === 'TRIAL' ? (
+                        <button
+                          onClick={() => {
+                            setSelectedLicenseToRenew(lic.id);
+                            setActiveTab('renew-license');
+                          }}
+                          className="w-full py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-md shadow-purple-900/40 transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+                        >
+                          <Sparkles size={16} />
+                          <span>ATIVAR LICENÇA</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setSelectedLicenseToRenew(lic.id);
+                            setActiveTab('renew-license');
+                          }}
+                          className="w-full py-3 bg-white hover:bg-gray-200 text-black font-bold text-xs rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+                        >
+                          <RefreshCw size={15} />
+                          <span>RENOVAR LICENÇA</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 2: COMPRAR ASSINATURA */}
+      {activeTab === 'buy-license' && (
+        <div className="space-y-6">
+          <div className="bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-2">
+            <div className="inline-flex items-center gap-2 bg-[#6A00FF]/20 border border-white/10 px-3 py-1 rounded-full text-xs font-bold text-gray-300">
+              <ShoppingCart size={14} />
+              <span>COMPRA DE ASSINATURA</span>
+            </div>
+            <h3 className="text-xl font-bold text-white tracking-tight">Adquirir Novas Assinaturas StreamFlix TV</h3>
+            <p className="text-xs text-gray-400">
+              Escolha a duração desejada. O pagamento é processado instantaneamente via PIX com ativação automática.
+            </p>
+          </div>
+
+          {!activePixOrder ? (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <div className="lg:col-span-7 bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-6">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2 border-b border-white/10 pb-3">
+                  <CreditCard size={16} className="text-gray-300" />
+                  <span>1. Selecione o Plano e Quantidade</span>
+                </h4>
+
+                <form onSubmit={handleCreatePurchase} className="space-y-5">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-300 block">Duração do Plano:</label>
+                    <div className="grid grid-cols-3 gap-3">
+                      {[12, 24, 36].map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setBuyPlanMonths(m)}
+                          className={`p-4 rounded-xl border text-center transition-all cursor-pointer ${
+                            buyPlanMonths === m
+                              ? 'bg-[#6A00FF]/20 border-[#6A00FF] text-white shadow-sm'
+                              : 'bg-[#000000] border-white/10 text-gray-400 hover:text-white'
+                          }`}
+                        >
+                          <span className="text-base font-bold block">{m} Meses</span>
+                          <span className="text-xs text-emerald-400 font-bold block mt-1">
+                            R$ {getUnitPriceForMonths(m).toFixed(2)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-300 block">Quantidade de Assinaturas:</label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={buyQuantity}
+                        onChange={(e) => setBuyQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                        className="w-32 bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-sm font-mono font-bold text-white text-center focus:outline-none focus:border-white/30"
+                      />
+                      <span className="text-xs text-gray-400">assinatura(s) individual(is) com código único de 6 caracteres</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#000000] p-4 rounded-xl border border-white/10 space-y-2 text-xs">
+                    <div className="flex items-center justify-between text-gray-400">
+                      <span>Valor Unitário:</span>
+                      <strong className="text-white font-mono">R$ {getUnitPriceForMonths(buyPlanMonths).toFixed(2)}</strong>
+                    </div>
+                    <div className="flex items-center justify-between text-gray-400">
+                      <span>Quantidade Selecionada:</span>
+                      <strong className="text-white font-mono">{buyQuantity} un.</strong>
+                    </div>
+                    <div className="flex items-center justify-between text-base font-bold text-white pt-2 border-t border-white/10">
+                      <span>Valor Total:</span>
+                      <strong className="text-emerald-400 font-mono">
+                        R$ {(getUnitPriceForMonths(buyPlanMonths) * buyQuantity).toFixed(2)}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-4 bg-white hover:bg-gray-200 text-black font-bold text-sm rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+                  >
+                    <QrCode size={18} />
+                    <span>GERAR PAGAMENTO PIX LYNX</span>
+                  </button>
+                </form>
+              </div>
+
+              <div className="lg:col-span-5 bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-4">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2 border-b border-white/10 pb-3">
+                  <ShieldCheck size={16} className="text-emerald-400" />
+                  <span>Ativação Instantânea Garantida</span>
+                </h4>
+
+                <div className="space-y-3 text-xs text-gray-300 leading-relaxed">
+                  <p>
+                    • Assim que o pagamento via PIX for detectado, suas assinaturas serão ativadas em poucos segundos.
+                  </p>
+                  <p>
+                    • Cada assinatura possui um **Código Alfanumérico exclusivo de 6 caracteres** (ex: <code className="text-emerald-400 font-mono bg-white/5 px-1.5 py-0.5 rounded">A82KQ9</code>).
+                  </p>
+                  <p>
+                    • Os códigos gerados aparecem imediatamente no menu **Minhas Assinaturas** para acesso instantâneo.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* Active Lynx PIX Order Screen */
+            <div className="max-w-2xl mx-auto bg-[#000000] border border-emerald-500/30 rounded-xl p-8 shadow-2xl space-y-6 animate-in fade-in zoom-in duration-200">
+              <div className="text-center space-y-1 border-b border-white/10 pb-4">
+                <span className="bg-amber-500/20 text-amber-400 text-xs font-bold px-3 py-1 rounded-full border border-amber-500/30 uppercase">
+                  AGUARDANDO PAGAMENTO PIX
+                </span>
+                <h3 className="text-2xl font-bold text-white tracking-tight">Pedido #{activePixOrder.orderNumber}</h3>
+                <p className="text-xs text-gray-400">Total: R$ {activePixOrder.totalPrice.toFixed(2)} ({activePixOrder.quantity} assinatura(s) de {activePixOrder.months} meses)</p>
+              </div>
+
+              <div className="flex flex-col items-center justify-center space-y-3">
+                <div className="w-48 h-48 bg-white p-3 rounded-xl flex items-center justify-center shadow-lg">
+                  <QrCode size={160} className="text-black" />
+                </div>
+                <span className="text-xs text-gray-400 font-mono">Abra o app do seu banco e escaneie o QR Code</span>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-300 block">Código Pix Copia e Cola:</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={activePixOrder.pixCopyPaste}
+                    className="flex-1 bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs font-mono text-emerald-400 truncate"
+                  />
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(activePixOrder.pixCopyPaste);
+                      setCopiedPix(true);
+                      setTimeout(() => setCopiedPix(false), 2000);
+                      showToast('Código PIX copiado para a área de transferência!');
+                    }}
+                    className="px-4 py-3 bg-[#6A00FF] hover:bg-[#801aff] text-white text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 shrink-0"
+                  >
+                    {copiedPix ? <Check size={16} /> : <Copy size={16} />}
+                    <span>{copiedPix ? 'Copiado!' : 'Copiar'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <button
+                  onClick={() => setActivePixOrder(null)}
+                  className="text-xs text-gray-400 hover:text-white underline cursor-pointer"
+                >
+                  Cancelar Pedido
+                </button>
+
+                <button
+                  onClick={handleSimulateLynxPixPayment}
+                  disabled={isProcessingPix}
+                  className="px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isProcessingPix ? (
+                    <RefreshCw size={16} className="animate-spin" />
+                  ) : (
+                    <CheckCircle2 size={16} />
+                  )}
+                  <span>{isProcessingPix ? 'Processando Webhook...' : 'Simular Confirmação Webhook Lynx PIX'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 3: RENOVAR OU ATIVAR ASSINATURA */}
+      {activeTab === 'renew-license' && (
+        <div className="space-y-6">
+          <div className="bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-2">
+            <div className="inline-flex items-center gap-2 bg-[#6A00FF]/20 border border-white/10 px-3 py-1 rounded-full text-xs font-bold text-gray-300">
+              <RefreshCw size={14} />
+              <span>{licenses.find(l => l.id === selectedLicenseToRenew)?.status === 'TRIAL' ? 'ATIVAÇÃO DE TESTE GRATUITO' : 'RENOVAÇÃO DE ASSINATURA'}</span>
+            </div>
+            <h3 className="text-xl font-bold text-white tracking-tight">
+              {licenses.find(l => l.id === selectedLicenseToRenew)?.status === 'TRIAL'
+                ? 'Ativar Assinatura em Teste Gratuito'
+                : 'Estender Validade da Assinatura'}
+            </h3>
+            <p className="text-xs text-gray-400">
+              {licenses.find(l => l.id === selectedLicenseToRenew)?.status === 'TRIAL'
+                ? 'Transforme seu teste gratuito em uma licença ativa oficial mantendo o mesmo código de acesso.'
+                : 'Selecione a assinatura que deseja renovar por mais 12, 24 ou 36 meses.'}
+            </p>
+          </div>
+
+          <div className="max-w-xl mx-auto bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-5">
+            <form onSubmit={handleRenewLicenseSubmit} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Selecione a Assinatura:</label>
+                <select
+                  value={selectedLicenseToRenew}
+                  onChange={(e) => setSelectedLicenseToRenew(e.target.value)}
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30 font-mono"
+                >
+                  {licenses.map((lic) => (
+                    <option key={lic.id} value={lic.id}>
+                      Código: {lic.code6Char} ({lic.status === 'TRIAL' ? 'TESTE GRATUITO' : lic.status}) - Validade: {lic.expiresAt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Selecione o Período:</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {[12, 24, 36].map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setRenewMonths(m)}
+                      className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                        renewMonths === m
+                          ? 'bg-[#6A00FF]/20 border-[#6A00FF] text-white shadow-sm'
+                          : 'bg-[#000000] border-white/10 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <span className="text-sm font-bold block">+{m} Meses</span>
+                      <span className="text-xs text-emerald-400 font-bold block mt-1">
+                        R$ {getUnitPriceForMonths(m).toFixed(2)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-4 bg-white hover:bg-gray-200 text-black font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+              >
+                <Sparkles size={16} />
+                <span>
+                  {licenses.find((l) => l.id === selectedLicenseToRenew)?.status === 'TRIAL'
+                    ? 'CONFIRMAR ATIVAÇÃO DA LICENÇA'
+                    : 'CONFIRMAR RENOVAÇÃO DA ASSINATURA'}
+                </span>
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: DISPOSITIVOS CONECTADOS */}
+      {activeTab === 'devices' && (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Smartphone size={18} className="text-gray-300" />
+                <span>Dispositivos Conectados</span>
+              </h3>
+              <p className="text-xs text-gray-400">Aparelhos e Smart TVs vinculados às suas assinaturas</p>
+            </div>
+
+            <span className="text-xs text-gray-400 font-mono bg-white/5 px-3 py-1 rounded-lg border border-white/10">
+              Identificação via Device ID & MAC
+            </span>
+          </div>
+
+          {devices.length === 0 ? (
+            <div className="bg-[#000000] border border-white/10 rounded-xl p-8 text-center space-y-3">
+              <Smartphone size={36} className="text-gray-500 mx-auto" />
+              <h4 className="text-sm font-bold text-white">Nenhum dispositivo conectado</h4>
+              <p className="text-xs text-gray-400">
+                Ao entrar no aplicativo StreamFlix TV na sua Smart TV ou celular, o dispositivo aparecerá listado aqui automaticamente.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {devices.map((dev) => (
+                <div
+                  key={dev.id}
+                  className="bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-4 relative overflow-hidden"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h4 className="text-base font-bold text-white">{dev.deviceName}</h4>
+                      <span className="text-xs text-gray-400 font-mono">Último Acesso: {dev.lastAccess}</span>
+                    </div>
+
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                        dev.status === 'Ativo'
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                      }`}
+                    >
+                      {dev.status}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t border-white/5 text-xs font-mono">
+                    <div className="flex items-center justify-between text-gray-300">
+                      <span className="text-gray-500 font-sans">Identificador (Device ID):</span>
+                      <strong className="text-white bg-white/5 px-2 py-0.5 rounded">{dev.deviceId}</strong>
+                    </div>
+
+                    {dev.macAddress && (
+                      <div className="flex items-center justify-between text-gray-300">
+                        <span className="text-gray-500 font-sans">Endereço MAC:</span>
+                        <strong className="text-emerald-400 bg-white/5 px-2 py-0.5 rounded">{dev.macAddress}</strong>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between text-gray-300">
+                      <span className="text-gray-500 font-sans">Assinatura Vinculada:</span>
+                      <strong className="text-gray-300 font-bold">{dev.linkedLicenseCode}</strong>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => handleDeactivateLicense(dev.linkedLicenseCode)}
+                      className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-bold rounded-lg border border-amber-500/30 transition-all flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Power size={13} />
+                      <span>Desativar</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleRemoveDevice(dev.id)}
+                      className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-bold rounded-lg border border-red-500/30 transition-all flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Trash2 size={13} />
+                      <span>Remover</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 5: HISTÓRICO DE COMPRAS */}
+      {activeTab === 'history' && (
+        <div className="space-y-6">
+          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+            <History size={18} className="text-gray-300" />
+            <span>Histórico de Compras e Transações</span>
+          </h3>
+
+          <div className="bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md overflow-x-auto">
+            {purchases.length === 0 ? (
+              <p className="text-xs text-gray-400 text-center py-4">Nenhuma transação registrada até o momento.</p>
+            ) : (
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-white/10 text-gray-400 font-bold uppercase text-[11px] tracking-wider">
+                    <th className="py-3 px-4">Pedido</th>
+                    <th className="py-3 px-4">Data/Hora</th>
+                    <th className="py-3 px-4">Plano Contratado</th>
+                    <th className="py-3 px-4">Qtd.</th>
+                    <th className="py-3 px-4">Valor Total</th>
+                    <th className="py-3 px-4">Código Ativado</th>
+                    <th className="py-3 px-4">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {purchases.map((p) => (
+                    <tr key={p.id} className="hover:bg-white/[0.02] transition-colors">
+                      <td className="py-3 px-4 font-bold text-white">{p.orderNumber}</td>
+                      <td className="py-3 px-4 text-gray-300 font-mono">{p.date}</td>
+                      <td className="py-3 px-4 text-white font-bold">{p.planName}</td>
+                      <td className="py-3 px-4 font-mono font-bold text-white">{p.quantity} un.</td>
+                      <td className="py-3 px-4 font-mono font-bold text-emerald-400">R$ {p.totalPrice.toFixed(2)}</td>
+                      <td className="py-3 px-4 font-mono font-bold text-gray-300">
+                        {p.generatedCodes.join(', ') || '-'}
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-bold border uppercase ${
+                            p.status === 'PAGO'
+                              ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/20'
+                              : 'bg-amber-500/20 text-amber-400 border-amber-500/20'
+                          }`}
+                        >
+                          {p.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 6: MINHA CONTA */}
+      {activeTab === 'account' && (
+        <div className="space-y-6">
+          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+            <User size={18} className="text-gray-300" />
+            <span>Dados da Minha Conta</span>
+          </h3>
+
+          <div className="max-w-xl mx-auto bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-4">
+            <div className="space-y-3 text-xs">
+              <div className="flex justify-between py-2 border-b border-white/5">
+                <span className="text-gray-400">Nome Completo:</span>
+                <strong className="text-white">{customerUser.name}</strong>
+              </div>
+              <div className="flex justify-between py-2 border-b border-white/5">
+                <span className="text-gray-400">E-mail:</span>
+                <strong className="text-white">{customerUser.email}</strong>
+              </div>
+              <div className="flex justify-between py-2 border-b border-white/5">
+                <span className="text-gray-400">Telefone:</span>
+                <strong className="text-white">{customerUser.phone}</strong>
+              </div>
+              <div className="flex justify-between py-2 border-b border-white/5">
+                <span className="text-gray-400">Origem do Cadastro:</span>
+                <strong className="text-emerald-400">{getFriendlyOrigin(customerUser.origin, customerUser.originName)}</strong>
+              </div>
+              <div className="flex justify-between py-2 border-b border-white/5">
+                <span className="text-gray-400">Provedor / Sistema:</span>
+                <strong className="text-white">{customerUser.originName}</strong>
+              </div>
+              <div className="flex justify-between py-2">
+                <span className="text-gray-400">Data de Cadastro:</span>
+                <strong className="text-white font-mono">{customerUser.createdAt}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 7: ALTERAR SENHA */}
+      {activeTab === 'change-password' && (
+        <div className="space-y-6">
+          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+            <Lock size={18} className="text-gray-300" />
+            <span>Alteração de Senha</span>
+          </h3>
+
+          <div className="max-w-md mx-auto bg-[#000000] border border-white/10 rounded-xl p-6 shadow-md space-y-4">
+            <form onSubmit={handleChangePasswordSubmit} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Senha Atual *</label>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Nova Senha *</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-gray-300 block mb-1">Confirmar Nova Senha *</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-3 text-xs text-white focus:outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3.5 bg-white hover:bg-gray-200 text-black font-bold text-xs rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+              >
+                <span>SALVAR NOVA SENHA</span>
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* DNS MODAL FOR ADDING SERVER */}
+      {showDnsModal && selectedLicForDns && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#000000] border border-white/10 rounded-xl p-6 max-w-md w-full space-y-4 relative shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                <Globe size={16} className="text-emerald-400" />
+                <span>Adicionar Servidor (DNS)</span>
+              </h4>
+              <button
+                onClick={() => {
+                  setShowDnsModal(false);
+                  setSelectedLicForDns(null);
+                  setNewDnsInput('');
+                }}
+                className="text-gray-400 hover:text-white text-xs font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-300">
+              Insira o endereço do servidor DNS para a assinatura <code className="text-emerald-400 font-mono font-bold">{selectedLicForDns.code6Char}</code>:
+            </p>
+
+            <div>
+              <label className="text-xs font-bold text-gray-300 block mb-1">URL / Endereço do Servidor:</label>
+              <input
+                type="text"
+                value={newDnsInput}
+                onChange={(e) => setNewDnsInput(e.target.value)}
+                placeholder="ex: http://cdn.meuservidor.com:8080"
+                className="w-full bg-[#000000] border border-white/10 rounded-lg px-4 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-white/30"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDnsModal(false);
+                  setSelectedLicForDns(null);
+                  setNewDnsInput('');
+                }}
+                className="px-4 py-2 bg-white/5 hover:bg-white/10 text-xs font-bold rounded-lg border border-white/10 text-gray-300 transition-all cursor-pointer"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                onClick={handleAddDnsSubmit}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold rounded-lg transition-all cursor-pointer"
+              >
+                Salvar Servidor
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

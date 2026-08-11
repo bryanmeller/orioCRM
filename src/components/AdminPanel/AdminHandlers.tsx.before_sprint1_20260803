@@ -1,0 +1,291 @@
+import { useState } from 'react';
+import { supabase } from '../../lib/supabase';
+import { createProviderPlan, updateProviderPlan, deleteProviderPlan, toggleProviderPlanStatus } from '../../services/admin/providerPlanService';
+import { createLicensePlan, updateLicensePlan, deleteLicensePlan, toggleLicensePlanStatus } from '../../services/admin/licensePlanService';
+import { createAccount, deleteAccount, toggleAccountStatus } from '../../services/admin/userService';
+import { createServer, updateServer, deleteServer, toggleServerStatus } from '../../services/admin/serverService';
+import { saveEndUser, deleteEndUser, toggleEndUserStatus } from '../../services/admin/endUserService';
+import { executeCreditTransaction } from '../../services/admin/creditService';
+import { createLicense, toggleLicenseStatus, deleteLicense, linkServerToLicense } from '../../services/admin/licenseService';
+
+export function useAdminHandlers(currentUser: any, reloadData: () => void, accounts: any[] = [], transactions: any[] = [], endUsers: any[] = []) {
+  const [creditSearch, setCreditSearch] = useState('');
+  const [creditTypeFilter, setCreditTypeFilter] = useState('TODOS');
+  const [showCreateAccountModal, setShowCreateAccountModal] = useState(false);
+  const [newAccName, setNewAccName] = useState('');
+  const [newAccEmail, setNewAccEmail] = useState('');
+  const [newAccOwnerType, setNewAccOwnerType] = useState('PROVEDOR');
+  
+  const [newAccParentId, setNewAccParentId] = useState('');
+  const [newAccPassword, setNewAccPassword] = useState('');
+  const [newAccStatus, setNewAccStatus] = useState('ACTIVE');
+  const [newAccPlanId, setNewAccPlanId] = useState('');
+  
+  const [showCreditModal, setShowCreditModal] = useState(false);
+  const [creditModalMode, setCreditModalMode] = useState<'ADD'|'REMOVE'>('ADD');
+  const [creditTargetAccId, setCreditTargetAccId] = useState('');
+  const [creditAmount, setCreditAmount] = useState<number>(0);
+  const [creditDescription, setCreditDescription] = useState('');
+  
+  const [toastMessage, setToastMessage] = useState<string|null>(null);
+  const [buyCreditsAmount, setBuyCreditsAmount] = useState(0);
+  const [lynxConfig, setLynxConfig] = useState<any>({ clientId: '', clientSecret: '', autoProcess: false, status: 'INATIVO' });
+  const [activePixOrder, setActivePixOrder] = useState<any>(null);
+  const [newEndUserCredentials, setNewEndUserCredentials] = useState<any>(null);
+  const [orderSearch, setOrderSearch] = useState('');
+  const [orderStatusFilter, setOrderStatusFilter] = useState('TODOS');
+  const [hierarchyRoleFilter, setHierarchyRoleFilter] = useState('TODOS');
+
+  const showToast = (msg: string) => {
+    alert(msg);
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  }
+
+  const currentUserBalanceRecord = { balance: 0 };
+  const visibleTransactions = transactions;
+  const visibleAccounts = hierarchyRoleFilter === 'TODOS' ? (accounts || []) : (accounts || []).filter((a: any) => a?.role === hierarchyRoleFilter || a?.role === (hierarchyRoleFilter === 'REVENDA' ? 'RESELLER' : hierarchyRoleFilter === 'SUBREVENDA' ? 'SUB_RESELLER' : hierarchyRoleFilter === 'PROVEDOR' ? 'PROVIDER' : hierarchyRoleFilter));
+  const downstreamTargetAccounts = accounts;
+  const visibleEndUsers = endUsers;
+
+  const handleToggleAccountStatus = async (id: string, current: string) => {
+    try {
+      await toggleAccountStatus(id, current);
+      showToast('Status da conta atualizado.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleDeleteAccount = async (id: string) => {
+    try {
+      await deleteAccount(id);
+      showToast('Conta excluída (lógico).'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleToggleLicenseStatus = async (id: string, current: string, expiresAt?: string) => {
+    try {
+      await toggleLicenseStatus(id, current);
+      showToast('Status da licença atualizado.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleDeleteLicense = async (id: string) => {
+    try {
+      await deleteLicense(id);
+      showToast('Licença excluída.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleCreateAccount = async (e: any) => {
+    e.preventDefault();
+    try {
+      const roleMap: Record<string, string> = {
+        'PROVEDOR': 'PROVIDER',
+        'REVENDA': 'RESELLER',
+        'SUBREVENDA': 'SUB_RESELLER'
+      };
+      const apiRole = roleMap[newAccOwnerType] || newAccOwnerType;
+
+      await createAccount({
+        full_name: newAccName,
+        email: newAccEmail,
+        password: newAccPassword || 'ChangeMe123!',
+        role: apiRole,
+        parent_id: apiRole === 'SUB_RESELLER' ? newAccParentId : null,
+        
+        plan_id: apiRole === 'PROVIDER' ? newAccPlanId : undefined,
+        status: newAccStatus
+      });
+      showToast('Conta criada com sucesso.'); reloadData();
+      setShowCreateAccountModal(false);
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleExecuteCreditOperation = async (e: any) => {
+    e.preventDefault();
+    try {
+      const type = creditModalMode === 'ADD' ? 'PURCHASE' : 'MANUAL_DEBIT';
+      // From currentUser to target
+      await executeCreditTransaction(
+        creditModalMode === 'ADD' ? currentUser.id : creditTargetAccId,
+        creditModalMode === 'ADD' ? creditTargetAccId : currentUser.id,
+        creditAmount,
+        type,
+        creditDescription
+      );
+      showToast('Operação de crédito realizada.'); reloadData();
+      setShowCreditModal(false);
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleActivateLicense = async (planId: string) => {
+    showToast('Ativação manual pendente integração.');
+  }
+
+  const handleRenewLicense = async (licenseId: string, planId: string) => {
+    showToast('Renovação pendente integração.');
+  }
+
+  const handleSavePlan = async (e: any, formData: any) => {
+    e.preventDefault();
+    try {
+      const payload = {
+        name: formData.name,
+        description: '',
+        validity_days: formData.days,
+        self_service_price: formData.sellPrice,
+        reseller_credit_cost: formData.creditCost,
+        devices_allowed: formData.maxDevices,
+        max_servers: formData.maxDns,
+        status: formData.status
+      };
+      if (formData.id) {
+        await updateLicensePlan(formData.id, payload);
+        showToast('Plano de licença atualizado.'); reloadData();
+      } else {
+        await createLicensePlan(payload);
+        showToast('Plano de licença criado.'); reloadData();
+      }
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleSaveProviderPlan = async (e: any, formData: any) => {
+    e.preventDefault();
+    try {
+      const payload = {
+        name: `Plano ${formData.maxUsers} Usuários`,
+        max_active_users: formData.maxUsers,
+        monthly_price: formData.price,
+        setup_fee: formData.setup,
+        max_servers: 10
+      };
+      // We don't have editing state for provider plans in modal, so always create
+      await createProviderPlan(payload);
+      showToast('Plano de provedor salvo com sucesso.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleSaveEndUser = async (e: any, formData: any) => {
+    e.preventDefault();
+    try {
+      const res = await saveEndUser(formData, currentUser.id);
+      showToast('Usuário final salvo com sucesso.'); 
+      reloadData();
+      if (!formData.id && res.licenseCode) {
+        setNewEndUserCredentials({
+          licenseCode: res.licenseCode,
+          username: res.username,
+          password: res.password
+        });
+      }
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleDeleteEndUser = async (id: string) => {
+    try {
+      await deleteEndUser(id);
+      showToast('Usuário final excluído.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleToggleEndUserStatus = async (id: string, current: string) => {
+    try {
+      await toggleEndUserStatus(id, current);
+      showToast('Status do usuário atualizado.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleResetEndUserPassword = async (id: string) => {
+    showToast('Reset pendente integração.');
+  }
+
+  const resetDnsForm = () => {}
+
+  const handleSaveDns = async (e: any, formData: any) => {
+    e.preventDefault();
+    try {
+      if (formData.id) {
+        await updateServer(formData.id, formData);
+        showToast('Servidor atualizado.'); reloadData();
+      } else {
+        await createServer(formData, formData.ownerId || currentUser.id);
+        showToast('Servidor criado com sucesso.'); reloadData();
+      }
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleM3UUpload = async (e: any) => {}
+  const handleFullUrlChange = (url: string) => {}
+  const handleTestConnection = async () => {}
+  const handleSimulateDeviceLogin = async (licenseKey: string) => {}
+  const handleCreatePixOrder = async (e: any) => {
+    e.preventDefault();
+    showToast("Pagamento temporariamente indisponível. Integração com o Gateway em configuração.");
+  }
+  const handleSimulateLynxWebhook = async (orderId?: string) => {
+    showToast("Pagamento temporariamente indisponível. Integração com o Gateway em configuração.");
+  }
+
+  const handleRemoveDevice = async (licenseIdOrDeviceId: string, optionalDeviceId?: string) => {
+    try {
+      const targetId = optionalDeviceId || licenseIdOrDeviceId;
+      await supabase.from('license_devices').delete().eq('id', targetId);
+      showToast('Dispositivo removido.'); reloadData();
+    } catch (err: any) {
+      showToast(`Erro: ${err.message}`);
+    }
+  }
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    window.location.reload();
+  }
+
+  return {
+    creditSearch, setCreditSearch, creditTypeFilter, setCreditTypeFilter,
+    showCreateAccountModal, setShowCreateAccountModal,
+    newAccName, setNewAccName, newAccEmail, setNewAccEmail,
+    newAccOwnerType, setNewAccOwnerType, 
+    newAccParentId, setNewAccParentId, newAccPassword, setNewAccPassword,
+    newAccStatus, setNewAccStatus, newAccPlanId, setNewAccPlanId,
+    showCreditModal, setShowCreditModal,
+    creditModalMode, setCreditModalMode, creditTargetAccId, setCreditTargetAccId,
+    creditAmount, setCreditAmount, creditDescription, setCreditDescription,
+    showToast, toastMessage, setToastMessage, currentUserBalanceRecord, visibleTransactions, visibleAccounts,
+    downstreamTargetAccounts, visibleEndUsers, buyCreditsAmount, setBuyCreditsAmount,
+    lynxConfig, setLynxConfig, activePixOrder, setActivePixOrder, orderSearch, setOrderSearch,
+    orderStatusFilter, setOrderStatusFilter, hierarchyRoleFilter, setHierarchyRoleFilter,
+    handleToggleAccountStatus, handleDeleteAccount,
+    handleToggleLicenseStatus, handleDeleteLicense, handleRemoveDevice,
+    handleCreateAccount, handleExecuteCreditOperation, handleActivateLicense,
+    handleRenewLicense, handleSavePlan, handleSaveEndUser, handleDeleteEndUser, handleToggleEndUserStatus,
+    handleResetEndUserPassword, resetDnsForm, handleSaveDns, handleM3UUpload,
+    handleFullUrlChange, handleTestConnection, handleSaveProviderPlan,
+    handleSimulateDeviceLogin, handleCreatePixOrder,
+    handleSimulateLynxWebhook, handleLogout, newEndUserCredentials, setNewEndUserCredentials
+  };
+}

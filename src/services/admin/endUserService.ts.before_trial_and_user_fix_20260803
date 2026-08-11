@@ -1,0 +1,76 @@
+import { secureFetchJSON } from './apiUtils';
+import { supabase } from '../../lib/supabase';
+
+export const getEndUserDTO = async (id: string) => {
+  const session = await supabase.auth.getSession();
+  const token = session.data.session?.access_token;
+  
+  const res = await fetch(`/api/admin/end-user-dto/${id}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Erro ao carregar dados do usuário.');
+  return data.dto || data.user;
+};
+
+export const saveEndUser = async (user: any, parentId: string) => {
+  const session = await supabase.auth.getSession();
+  const token = session.data.session?.access_token;
+
+  // If editing an existing user
+  if (user.id) {
+    const result = await secureFetchJSON('/api/admin/update-end-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(user)
+    });
+
+    if (result.error) throw new Error(result.error);
+    return result;
+  } else {
+    // New end user via secure endpoint
+    const result = await secureFetchJSON('/api/admin/create-auth-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        email: user.email || `${user.username}@mock.com`,
+        password: user.password,
+        full_name: user.name,
+        username: user.username,
+        role: 'END_USER',
+        parent_id: parentId,
+        business_mode: 'CUSTOMER',
+        portal_access: user.portal_access,
+        status: user.status,
+        plan_id: user.planId || user.plan_id,
+        selected_server_ids: user.selected_server_ids
+      })
+    });
+
+    if (result.success !== true) throw new Error('Criação não concluída completamente.');
+    return result;
+  }
+};
+
+export const deleteEndUser = async (id: string) => {
+  const { error } = await supabase.from('profiles').update({ status: 'ARCHIVED' }).eq('id', id);
+  if (error) throw new Error(error.message);
+  
+  // Update license status
+  const { error: licError } = await supabase.from('licenses').update({ status: 'INACTIVE' }).eq('end_user_id', id);
+  if (licError) throw new Error(licError.message);
+};
+
+export const toggleEndUserStatus = async (id: string, currentStatus: string) => {
+  const newStatus = currentStatus === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+  const { error } = await supabase.from('profiles').update({ status: newStatus }).eq('id', id);
+  if (error) throw new Error(error.message);
+};

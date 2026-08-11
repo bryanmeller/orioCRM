@@ -1,0 +1,66 @@
+import { secureFetchJSON } from './apiUtils';
+import { supabase } from '../../lib/supabase';
+
+export const saveEndUser = async (user: any, parentId: string) => {
+  // If editing an existing user (mock or real)
+  if (user.id) {
+    const { data, error } = await supabase.from('profiles')
+      .update({
+        full_name: user.name,
+        email: user.email || `${user.username}@mock.com`,
+      })
+      .eq('id', user.id).select().single();
+    if (error) throw new Error(error.message);
+
+    // Update license as well
+    const { error: licError } = await supabase.from('licenses')
+      .update({
+        name: user.name,
+        devices_allowed: user.devices_allowed || 1,
+        max_servers: user.max_servers || 1
+      }).eq('owner_id', user.id);
+    if (licError) throw new Error(licError.message);
+
+    return data;
+  } else {
+    // New end user via secure endpoint
+    const result = await secureFetchJSON('/api/admin/create-auth-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`
+      },
+      body: JSON.stringify({
+        email: user.email || `${user.username}@mock.com`,
+        password: user.password,
+        full_name: user.name,
+        username: user.username,
+        role: 'END_USER',
+        parent_id: parentId,
+        business_mode: 'CUSTOMER',
+        portal_access: user.portal_access,
+        plan_id: user.planId,
+        selected_server_ids: user.selected_server_ids
+      })
+    });
+
+
+    if (result.success !== true) throw new Error('Criação não concluída completamente.');
+    return result;
+  }
+};
+
+export const deleteEndUser = async (id: string) => {
+  const { error } = await supabase.from('profiles').update({ status: 'ARCHIVED' }).eq('id', id);
+  if (error) throw new Error(error.message);
+  
+  // Update license status
+  const { error: licError } = await supabase.from('licenses').update({ status: 'INACTIVE' }).eq('end_user_id', id);
+  if (licError) throw new Error(licError.message);
+};
+
+export const toggleEndUserStatus = async (id: string, currentStatus: string) => {
+  const newStatus = currentStatus === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+  const { error } = await supabase.from('profiles').update({ status: newStatus }).eq('id', id);
+  if (error) throw new Error(error.message);
+};

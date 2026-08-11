@@ -1,0 +1,8 @@
+{
+  "name": "Remix StreamFlix TV - Android TV Foundation",
+  "description": "Aplicativo StreamFlix TV para Android TV e Fire TV com interface elegante Leanback, Design System escuro luxuoso, TV ao Vivo, Filmes, Séries e Player integrado.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
