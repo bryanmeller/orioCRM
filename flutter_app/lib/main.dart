@@ -6,6 +6,8 @@ import 'initial_screen.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
 import 'player_screen.dart';
+import 'series_details_screen.dart';
+import 'api_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,7 +61,7 @@ class StreamFlixApp extends StatelessWidget {
             return MaterialPageRoute(
                 builder: (_) => LoginScreen(deviceId: deviceId));
           case '/home':
-            return MaterialPageRoute(builder: (_) => HomeScreen());
+            return MaterialPageRoute(builder: (_) => const HomeScreen());
           case '/player':
             final args = settings.arguments as Map<String, dynamic>? ?? {};
             final alternateVideoUrls = (args['alternateVideoUrls'] is List)
@@ -75,8 +77,17 @@ class StreamFlixApp extends StatelessWidget {
                 category: args['category'] ?? '',
                 videoUrl: args['videoUrl'] ?? '',
                 alternateVideoUrls: alternateVideoUrls,
+                contentType: (args['contentType'] ?? '').toString(),
               ),
             );
+          case '/series':
+            final series = settings.arguments;
+            if (series is IptvContentItem) {
+              return MaterialPageRoute(
+                builder: (_) => SeriesDetailsScreen(series: series),
+              );
+            }
+            return MaterialPageRoute(builder: (_) => const HomeScreen());
           default:
             return MaterialPageRoute(builder: (_) => InitialScreen());
         }

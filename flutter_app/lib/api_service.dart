@@ -92,10 +92,34 @@ class IptvCatalog {
   const IptvCatalog({required this.categories, required this.items});
 }
 
+class IptvSeriesSeason {
+  final String id;
+  final String title;
+  final List<IptvContentItem> episodes;
+
+  const IptvSeriesSeason({
+    required this.id,
+    required this.title,
+    required this.episodes,
+  });
+}
+
+class IptvSeriesDetails {
+  final IptvContentItem series;
+  final String plot;
+  final List<IptvSeriesSeason> seasons;
+
+  const IptvSeriesDetails({
+    required this.series,
+    required this.plot,
+    required this.seasons,
+  });
+}
+
 class ApiService {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://10.0.0.2:3000/api',
+    defaultValue: 'https://lightseagreen-rail-619623.hostingersite.com/api',
   );
 
   static Future<Map<String, dynamic>> loginApp({
@@ -353,6 +377,19 @@ class ApiService {
   static Future<IptvContentItem> fetchFirstSeriesEpisode(
     IptvContentItem series,
   ) async {
+    final details = await fetchSeriesDetails(series);
+    for (final season in details.seasons) {
+      if (season.episodes.isNotEmpty) {
+        return season.episodes.first;
+      }
+    }
+
+    throw Exception('Nenhum episodio encontrado para esta serie.');
+  }
+
+  static Future<IptvSeriesDetails> fetchSeriesDetails(
+    IptvContentItem series,
+  ) async {
     final server = await _requireActiveServer();
     final uri = Uri.parse(
       '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_series_info&series_id=${Uri.encodeQueryComponent(series.id)}',
@@ -375,45 +412,94 @@ class ApiService {
       throw Exception('Nenhum episodio encontrado para esta serie.');
     }
 
-    Map<String, dynamic>? firstEpisode;
-    for (final season in episodes.values) {
-      if (season is List && season.isNotEmpty && season.first is Map) {
-        firstEpisode = Map<String, dynamic>.from(season.first as Map);
-        break;
+    final seasons = <IptvSeriesSeason>[];
+    final sortedEntries = episodes.entries.toList()
+      ..sort(
+          (a, b) => _seasonSortValue(a.key).compareTo(_seasonSortValue(b.key)));
+
+    for (final entry in sortedEntries) {
+      final rawSeason = entry.value;
+      if (rawSeason is! List) {
+        continue;
+      }
+
+      final seasonId = _stringValue(entry.key);
+      final seasonNumber = _seasonSortValue(entry.key);
+      final sortedEpisodes = rawSeason.whereType<Map>().toList()
+        ..sort((a, b) => _episodeSortValue(a).compareTo(_episodeSortValue(b)));
+
+      final seasonEpisodes = sortedEpisodes
+          .map((item) => _seriesEpisodeFromJson(
+                series: series,
+                server: server,
+                seasonId: seasonId,
+                seasonNumber: seasonNumber,
+                json: Map<String, dynamic>.from(item),
+              ))
+          .where((episode) => episode.streamUrl.isNotEmpty)
+          .toList();
+
+      if (seasonEpisodes.isNotEmpty) {
+        seasons.add(
+          IptvSeriesSeason(
+            id: seasonId.isNotEmpty ? seasonId : '${seasons.length + 1}',
+            title: seasonNumber > 0
+                ? 'Temporada $seasonNumber'
+                : 'Temporada ${seasons.length + 1}',
+            episodes: seasonEpisodes,
+          ),
+        );
       }
     }
 
-    if (firstEpisode == null) {
+    if (seasons.isEmpty) {
       throw Exception('Nenhum episodio encontrado para esta serie.');
     }
 
-    final episodeId =
-        _stringValue(firstEpisode['id'] ?? firstEpisode['episode_id']);
-    final ext =
-        _stringValue(firstEpisode['container_extension'], fallback: 'mp4');
+    final info = decoded['info'] is Map
+        ? Map<String, dynamic>.from(decoded['info'] as Map)
+        : <String, dynamic>{};
+
+    return IptvSeriesDetails(
+      series: series,
+      plot: _stringValue(info['plot'] ?? info['description']),
+      seasons: seasons,
+    );
+  }
+
+  static IptvContentItem _seriesEpisodeFromJson({
+    required IptvContentItem series,
+    required IptvServer server,
+    required String seasonId,
+    required int seasonNumber,
+    required Map<String, dynamic> json,
+  }) {
+    final episodeId = _stringValue(json['id'] ?? json['episode_id']);
+    final ext = _stringValue(json['container_extension'], fallback: 'mp4');
     var streamUrl = _stringValue(
-      firstEpisode['streamUrl'] ??
-          firstEpisode['url'] ??
-          firstEpisode['direct_source'],
+      json['streamUrl'] ?? json['url'] ?? json['direct_source'],
     );
     if (streamUrl.isEmpty && episodeId.isNotEmpty) {
       streamUrl =
           '${server.cleanBaseUrl}/series/${server.encodedUsername}/${server.encodedPassword}/$episodeId.$ext';
     }
 
-    if (streamUrl.isEmpty) {
-      throw Exception('Episodio sem URL de reproducao.');
-    }
-
     final episodeTitle = _stringValue(
-      firstEpisode['title'] ?? firstEpisode['name'],
-      fallback: 'Episodio 1',
+      json['title'] ?? json['name'],
+      fallback: 'Episodio',
     );
+    final episodeNum = _stringValue(json['episode_num'] ?? json['episode']);
+    final seasonLabel = seasonNumber > 0 ? 'T$seasonNumber' : 'Temporada';
+    final episodeLabel = episodeNum.isNotEmpty ? 'E$episodeNum' : '';
+    final prefix =
+        [seasonLabel, episodeLabel].where((part) => part.isNotEmpty).join(' ');
 
     return IptvContentItem(
-      id: episodeId.isNotEmpty ? episodeId : '${series.id}-ep-1',
-      title: '${series.title} - $episodeTitle',
-      subtitle: series.title,
+      id: episodeId.isNotEmpty
+          ? episodeId
+          : '${series.id}-$seasonId-$episodeTitle',
+      title: episodeTitle,
+      subtitle: prefix.isNotEmpty ? prefix : series.title,
       category: series.category,
       categoryId: series.categoryId,
       streamUrl: streamUrl,
@@ -604,6 +690,33 @@ String _stringValue(dynamic value, {String fallback = ''}) {
   }
   final text = value.toString().trim();
   return text.isEmpty ? fallback : text;
+}
+
+int _seasonSortValue(dynamic value) {
+  final parsed =
+      int.tryParse(_stringValue(value).replaceAll(RegExp(r'\D'), ''));
+  return parsed ?? 9999;
+}
+
+int _episodeSortValue(Map item) {
+  final explicit = int.tryParse(
+    _stringValue(item['episode_num'] ?? item['episode'] ?? item['num']),
+  );
+  if (explicit != null) {
+    return explicit;
+  }
+
+  final title = _stringValue(item['title'] ?? item['name']);
+  final fromTitle =
+      RegExp(r'(?:E|Ep\.?|Episodio)\s*(\d+)', caseSensitive: false)
+          .firstMatch(title)
+          ?.group(1);
+  final parsed = int.tryParse(fromTitle ?? '');
+  if (parsed != null) {
+    return parsed;
+  }
+  final id = _stringValue(item['id'] ?? item['episode_id']);
+  return int.tryParse(id.replaceAll(RegExp(r'\D'), '')) ?? 9999;
 }
 
 String _cleanBaseUrl(String value) {

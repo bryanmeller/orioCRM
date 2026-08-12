@@ -6,6 +6,7 @@ class TvFocusable extends StatefulWidget {
   final VoidCallback? onPressed;
   final bool autofocus;
   final bool enabled;
+  final FocusNode? focusNode;
   final ValueChanged<bool>? onFocusChange;
 
   const TvFocusable({
@@ -14,6 +15,7 @@ class TvFocusable extends StatefulWidget {
     this.onPressed,
     this.autofocus = false,
     this.enabled = true,
+    this.focusNode,
     this.onFocusChange,
   });
 
@@ -56,6 +58,7 @@ class _TvFocusableState extends State<TvFocusable> {
           ),
         },
         child: FocusableActionDetector(
+          focusNode: widget.focusNode,
           autofocus: widget.autofocus,
           enabled: widget.enabled,
           mouseCursor:

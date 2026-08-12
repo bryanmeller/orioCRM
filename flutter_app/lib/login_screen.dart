@@ -21,10 +21,13 @@ class _LoginScreenState extends State<LoginScreen> {
   final _codeFocusNode = FocusNode();
   final _userFocusNode = FocusNode();
   final _passFocusNode = FocusNode();
+  final _loginFocusNode = FocusNode();
+  final _firstKeyboardKeyFocusNode = FocusNode();
 
   bool _isLoading = false;
   String? _errorMessage;
-  bool _obscurePassword = true;
+  int _activeFieldIndex = 0;
+  bool _shiftKeyboard = false;
 
   @override
   void initState() {
@@ -49,7 +52,64 @@ class _LoginScreenState extends State<LoginScreen> {
     _codeFocusNode.dispose();
     _userFocusNode.dispose();
     _passFocusNode.dispose();
+    _loginFocusNode.dispose();
+    _firstKeyboardKeyFocusNode.dispose();
     super.dispose();
+  }
+
+  TextEditingController get _activeController {
+    return [
+      _codeController,
+      _userController,
+      _passController
+    ][_activeFieldIndex];
+  }
+
+  FocusNode get _activeFieldFocusNode {
+    return [_codeFocusNode, _userFocusNode, _passFocusNode][_activeFieldIndex];
+  }
+
+  void _selectField(int index, {bool moveToKeyboard = false}) {
+    setState(() => _activeFieldIndex = index);
+    final targetFocus =
+        moveToKeyboard ? _firstKeyboardKeyFocusNode : _activeFieldFocusNode;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        targetFocus.requestFocus();
+      }
+    });
+  }
+
+  void _appendToActiveField(String value) {
+    final controller = _activeController;
+    controller.text = '${controller.text}$value';
+    controller.selection =
+        TextSelection.collapsed(offset: controller.text.length);
+    setState(() {});
+  }
+
+  void _backspaceActiveField() {
+    final controller = _activeController;
+    if (controller.text.isEmpty) {
+      return;
+    }
+    controller.text = controller.text.substring(0, controller.text.length - 1);
+    controller.selection =
+        TextSelection.collapsed(offset: controller.text.length);
+    setState(() {});
+  }
+
+  void _clearActiveField() {
+    _activeController.clear();
+    setState(() {});
+  }
+
+  void _goToNextLoginTarget() {
+    if (_activeFieldIndex < 2) {
+      _selectField(_activeFieldIndex + 1);
+    } else {
+      _loginFocusNode.requestFocus();
+    }
   }
 
   Future<void> _handleLogin() async {
@@ -280,7 +340,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _buildLoginPanel(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(32),
+      padding: const EdgeInsets.all(28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -295,80 +355,60 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Informe seu Código, Usuário e Senha para entrar.',
+            'Informe seu Codigo, Usuario e Senha para entrar.',
             style: TextStyle(color: Colors.grey, fontSize: 14),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
           if (_errorMessage != null) ...[
             Container(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
                 color: Colors.red.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(16),
               ),
               child: Text(
                 _errorMessage!,
-                style: const TextStyle(color: Colors.redAccent, fontSize: 15),
+                style: const TextStyle(color: Colors.redAccent, fontSize: 14),
                 textAlign: TextAlign.center,
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
           ],
-          TextField(
-            autofocus: true,
-            focusNode: _codeFocusNode,
+          _buildTvTextField(
+            index: 0,
+            label: 'Codigo',
+            icon: Icons.vpn_key,
             controller: _codeController,
-            textInputAction: TextInputAction.next,
-            onEditingComplete: () =>
-                FocusScope.of(context).requestFocus(_userFocusNode),
-            style: const TextStyle(color: Colors.white, fontSize: 16),
-            decoration: _buildInputDecoration('Código', Icons.vpn_key),
+            focusNode: _codeFocusNode,
+            autofocus: true,
           ),
-          const SizedBox(height: 18),
-          TextField(
-            focusNode: _userFocusNode,
+          const SizedBox(height: 12),
+          _buildTvTextField(
+            index: 1,
+            label: 'Usuario',
+            icon: Icons.person,
             controller: _userController,
-            textInputAction: TextInputAction.next,
-            onEditingComplete: () =>
-                FocusScope.of(context).requestFocus(_passFocusNode),
-            style: const TextStyle(color: Colors.white, fontSize: 16),
-            decoration: _buildInputDecoration('Usuário', Icons.person),
+            focusNode: _userFocusNode,
           ),
-          const SizedBox(height: 18),
-          TextField(
-            focusNode: _passFocusNode,
+          const SizedBox(height: 12),
+          _buildTvTextField(
+            index: 2,
+            label: 'Senha',
+            icon: Icons.lock,
             controller: _passController,
-            obscureText: _obscurePassword,
-            textInputAction: TextInputAction.done,
-            onEditingComplete: () {
-              if (!_isLoading) {
-                _handleLogin();
-              }
-            },
-            style: const TextStyle(color: Colors.white, fontSize: 16),
-            decoration: _buildInputDecoration(
-              'Senha',
-              Icons.lock,
-              suffix: IconButton(
-                icon: Icon(
-                  _obscurePassword ? Icons.visibility_off : Icons.visibility,
-                  color: Colors.grey,
-                ),
-                onPressed: () {
-                  setState(() {
-                    _obscurePassword = !_obscurePassword;
-                  });
-                },
-              ),
-            ),
+            focusNode: _passFocusNode,
+            obscure: true,
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 16),
+          _buildTvKeyboard(),
+          const SizedBox(height: 16),
           TvFocusable(
+            focusNode: _loginFocusNode,
             enabled: !_isLoading,
             onPressed: _handleLogin,
             builder: (context, focused) => AnimatedContainer(
               duration: const Duration(milliseconds: 140),
-              padding: const EdgeInsets.symmetric(vertical: 18),
+              padding: const EdgeInsets.symmetric(vertical: 16),
               decoration: tvFocusDecoration(
                 focused: focused,
                 baseColor: focused ? Colors.white : const Color(0xFF6A00FF),
@@ -378,8 +418,8 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Center(
                 child: _isLoading
                     ? SizedBox(
-                        width: 24,
-                        height: 24,
+                        width: 22,
+                        height: 22,
                         child: CircularProgressIndicator(
                           color:
                               focused ? const Color(0xFF6A00FF) : Colors.white,
@@ -392,7 +432,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           color:
                               focused ? const Color(0xFF6A00FF) : Colors.white,
                           fontWeight: FontWeight.bold,
-                          fontSize: 16,
+                          fontSize: 15,
                         ),
                       ),
               ),
@@ -403,26 +443,174 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  InputDecoration _buildInputDecoration(String label, IconData icon,
-      {Widget? suffix}) {
-    return InputDecoration(
-      labelText: label,
-      labelStyle: const TextStyle(color: Colors.grey),
-      filled: true,
-      fillColor: const Color(0xFF14141A),
-      prefixIcon: Icon(icon, color: Colors.grey),
-      suffixIcon: suffix,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(16),
-        borderSide: BorderSide(color: Colors.white10),
+  Widget _buildTvTextField({
+    required int index,
+    required String label,
+    required IconData icon,
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    bool autofocus = false,
+    bool obscure = false,
+  }) {
+    final value = controller.text;
+    final isActive = _activeFieldIndex == index;
+    final displayValue = obscure && value.isNotEmpty
+        ? List.filled(
+                value.length.clamp(4, 12).toInt(), String.fromCharCode(8226))
+            .join()
+        : value;
+
+    return TvFocusable(
+      focusNode: focusNode,
+      autofocus: autofocus,
+      onPressed: () => _selectField(index, moveToKeyboard: true),
+      onFocusChange: (focused) {
+        if (focused && _activeFieldIndex != index) {
+          setState(() => _activeFieldIndex = index);
+        }
+      },
+      builder: (context, focused) => AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        height: 62,
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        decoration: tvFocusDecoration(
+          focused: focused || isActive,
+          baseColor: const Color(0xFF14141A),
+          radius: 16,
+          borderColor: Colors.white12,
+          focusedColor:
+              focused ? const Color(0xFFB47CFF) : const Color(0xFF6A00FF),
+        ),
+        child: Row(
+          children: [
+            Icon(icon,
+                color: focused || isActive
+                    ? const Color(0xFFB47CFF)
+                    : Colors.grey),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                displayValue.isEmpty ? label : displayValue,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: displayValue.isEmpty ? Colors.white54 : Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(16),
-        borderSide: BorderSide(color: Colors.white10),
+    );
+  }
+
+  Widget _buildTvKeyboard() {
+    final rows = _shiftKeyboard
+        ? const [
+            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+            ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+            ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+            ['Z', 'X', 'C', 'V', 'B', 'N', 'M', '.', '_'],
+          ]
+        : const [
+            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+            ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+            ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
+            ['z', 'x', 'c', 'v', 'b', 'n', 'm', '.', '_'],
+          ];
+
+    return FocusTraversalGroup(
+      policy: ReadingOrderTraversalPolicy(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var rowIndex = 0; rowIndex < rows.length; rowIndex++) ...[
+            Row(
+              children: [
+                for (var keyIndex = 0;
+                    keyIndex < rows[rowIndex].length;
+                    keyIndex++) ...[
+                  Expanded(
+                    child: _buildKeyboardKey(
+                      rows[rowIndex][keyIndex],
+                      focusNode: rowIndex == 0 && keyIndex == 0
+                          ? _firstKeyboardKeyFocusNode
+                          : null,
+                      onPressed: () =>
+                          _appendToActiveField(rows[rowIndex][keyIndex]),
+                    ),
+                  ),
+                  if (keyIndex < rows[rowIndex].length - 1)
+                    const SizedBox(width: 6),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+          ],
+          Row(
+            children: [
+              Expanded(
+                child: _buildKeyboardKey(
+                  _shiftKeyboard ? 'abc' : 'ABC',
+                  onPressed: () =>
+                      setState(() => _shiftKeyboard = !_shiftKeyboard),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                  flex: 2,
+                  child: _buildKeyboardKey('Espaco',
+                      onPressed: () => _appendToActiveField(' '))),
+              const SizedBox(width: 6),
+              Expanded(
+                  child: _buildKeyboardKey('Apagar',
+                      onPressed: _backspaceActiveField)),
+              const SizedBox(width: 6),
+              Expanded(
+                  child: _buildKeyboardKey('Limpar',
+                      onPressed: _clearActiveField)),
+              const SizedBox(width: 6),
+              Expanded(
+                  child: _buildKeyboardKey('Proximo',
+                      onPressed: _goToNextLoginTarget)),
+            ],
+          ),
+        ],
       ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(16),
-        borderSide: const BorderSide(color: Color(0xFF6A00FF), width: 2),
+    );
+  }
+
+  Widget _buildKeyboardKey(
+    String label, {
+    required VoidCallback onPressed,
+    FocusNode? focusNode,
+  }) {
+    return TvFocusable(
+      focusNode: focusNode,
+      onPressed: onPressed,
+      builder: (context, focused) => AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        height: 34,
+        alignment: Alignment.center,
+        decoration: tvFocusDecoration(
+          focused: focused,
+          baseColor: focused ? Colors.white : const Color(0xFF1A1B22),
+          radius: 8,
+          borderColor: Colors.white10,
+          focusedColor: const Color(0xFFB47CFF),
+        ),
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: focused ? const Color(0xFF6A00FF) : Colors.white,
+            fontSize: label.length > 6 ? 10 : 13,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
       ),
     );
   }

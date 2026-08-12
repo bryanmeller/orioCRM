@@ -31,7 +31,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _errorMessage;
   bool _loading = true;
   String _selectedCategory = 'todos';
+  String _searchQuery = '';
   IptvContentItem? _selectedItem;
+  final TextEditingController _searchController = TextEditingController();
 
   IptvCatalog _liveCatalog = const IptvCatalog(categories: [], items: []);
   IptvCatalog _movieCatalog = const IptvCatalog(categories: [], items: []);
@@ -42,6 +44,12 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadHome();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadHome() async {
@@ -128,17 +136,28 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   List<IptvContentItem> get _filteredItems {
-    final items = _activeCatalog.items;
-    if (_selectedCategory == 'todos') {
+    var items = _activeCatalog.items;
+    if (_selectedCategory != 'todos') {
+      items =
+          items.where((item) => item.categoryId == _selectedCategory).toList();
+    }
+
+    final query = _normalizedSearch(_searchQuery);
+    if (query.isEmpty) {
       return items;
     }
-    return items.where((item) => item.categoryId == _selectedCategory).toList();
+
+    return items.where((item) {
+      return _normalizedSearch(_searchableText(item)).contains(query);
+    }).toList();
   }
 
   void _selectSection(HomeSection section) {
     setState(() {
       _activeSection = section;
       _selectedCategory = 'todos';
+      _searchQuery = '';
+      _searchController.clear();
       final catalog = _activeCatalog;
       _selectedItem = catalog.items.isNotEmpty ? catalog.items.first : null;
     });
@@ -147,12 +166,44 @@ class _HomeScreenState extends State<HomeScreen> {
   void _selectCategory(String categoryId) {
     setState(() {
       _selectedCategory = categoryId;
-      final items = _activeCatalog.items;
-      final filteredItems = categoryId == 'todos'
-          ? items
-          : items.where((item) => item.categoryId == categoryId).toList();
+      final filteredItems = _filteredItems;
       _selectedItem = filteredItems.isNotEmpty ? filteredItems.first : null;
     });
+  }
+
+  void _updateSearch(String value) {
+    setState(() {
+      _searchQuery = value;
+      final items = _filteredItems;
+      _selectedItem = items.isNotEmpty ? items.first : null;
+    });
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    _updateSearch('');
+  }
+
+  String _searchableText(IptvContentItem item) {
+    return [
+      item.title,
+      item.subtitle,
+      item.category,
+      item.nextShowing ?? '',
+      item.year ?? '',
+    ].join(' ');
+  }
+
+  String _normalizedSearch(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[áàãâä]'), 'a')
+        .replaceAll(RegExp(r'[éèêë]'), 'e')
+        .replaceAll(RegExp(r'[íìîï]'), 'i')
+        .replaceAll(RegExp(r'[óòõôö]'), 'o')
+        .replaceAll(RegExp(r'[úùûü]'), 'u')
+        .replaceAll('ç', 'c')
+        .trim();
   }
 
   Future<void> _toggleFavorite(IptvContentItem item) async {
@@ -170,13 +221,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _playItem(IptvContentItem item) async {
     try {
-      var playable = item;
       if (item.type == 'series') {
-        setState(() => _errorMessage = null);
-        playable = await ApiService.fetchFirstSeriesEpisode(item);
+        Navigator.of(context).pushNamed('/series', arguments: item);
+        return;
       }
 
-      if (playable.streamUrl.isEmpty) {
+      if (item.streamUrl.isEmpty) {
         throw Exception('Este conteudo nao possui URL de reproducao.');
       }
 
@@ -187,11 +237,12 @@ class _HomeScreenState extends State<HomeScreen> {
       Navigator.of(context).pushNamed(
         '/player',
         arguments: {
-          'title': playable.title,
-          'subtitle': playable.subtitle,
-          'category': playable.category,
-          'videoUrl': playable.streamUrl,
-          'alternateVideoUrls': playable.alternateStreamUrls,
+          'title': item.title,
+          'subtitle': item.subtitle,
+          'category': item.category,
+          'videoUrl': item.streamUrl,
+          'alternateVideoUrls': item.alternateStreamUrls,
+          'contentType': item.type,
         },
       );
     } catch (error) {
@@ -360,6 +411,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildTopBar() {
+    final canSearch = _activeSection == HomeSection.live ||
+        _activeSection == HomeSection.movies ||
+        _activeSection == HomeSection.series ||
+        _activeSection == HomeSection.favorites;
+
     return Container(
       height: 86,
       padding: const EdgeInsets.symmetric(horizontal: 28),
@@ -370,27 +426,35 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _activeSection.label,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _activeSection.label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Servidor: $_serverName',
-                style: const TextStyle(color: Colors.white54, fontSize: 13),
-              ),
-            ],
+                const SizedBox(height: 6),
+                Text(
+                  'Servidor: $_serverName',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+              ],
+            ),
           ),
           Row(
             children: [
+              if (canSearch) ...[
+                SizedBox(width: 280, child: _buildSearchBar(compact: true)),
+                const SizedBox(width: 12),
+              ],
               TvFocusable(
                 onPressed: _loadHome,
                 builder: (context, focused) => AnimatedContainer(
@@ -432,6 +496,8 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         children: [
           _buildCatalogSummary(),
+          const SizedBox(height: 12),
+          _buildSearchBar(),
           const SizedBox(height: 12),
           _buildCategoryRail(_activeCatalog.categories),
           const SizedBox(height: 12),
@@ -653,6 +719,49 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildSearchBar({bool compact = false}) {
+    final sectionName = _activeSection == HomeSection.live
+        ? 'canais'
+        : _activeSection == HomeSection.movies
+            ? 'filmes'
+            : _activeSection == HomeSection.series
+                ? 'series'
+                : 'conteudos';
+
+    return SizedBox(
+      height: compact ? 48 : 52,
+      child: TextField(
+        controller: _searchController,
+        onChanged: _updateSearch,
+        textInputAction: TextInputAction.search,
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+        decoration: InputDecoration(
+          hintText: 'Pesquisar $sectionName',
+          hintStyle: const TextStyle(color: Colors.white38),
+          prefixIcon: const Icon(Icons.search, color: Color(0xFFB47CFF)),
+          suffixIcon: _searchQuery.isEmpty
+              ? null
+              : IconButton(
+                  onPressed: _clearSearch,
+                  icon: const Icon(Icons.close, color: Colors.white54),
+                ),
+          filled: true,
+          fillColor: const Color(0xFF101216),
+          contentPadding:
+              EdgeInsets.symmetric(horizontal: 16, vertical: compact ? 12 : 14),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Colors.white10),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFFB47CFF), width: 2),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildCatalogSummary() {
     final item = _selectedItem;
     final count = _filteredItems.length;
@@ -719,10 +828,13 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     if (items.isEmpty) {
-      return const Center(
+      final message = _searchQuery.trim().isEmpty
+          ? 'Nenhum conteudo encontrado nesta categoria.'
+          : 'Nenhum resultado para "${_searchQuery.trim()}".';
+      return Center(
         child: Text(
-          'Nenhum conteudo encontrado nesta categoria.',
-          style: TextStyle(color: Colors.white70),
+          message,
+          style: const TextStyle(color: Colors.white70),
         ),
       );
     }

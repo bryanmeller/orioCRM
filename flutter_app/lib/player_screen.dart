@@ -1,8 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:flutter/services.dart';
+import 'package:video_player/video_player.dart';
 
 class PlayerScreen extends StatefulWidget {
   final String title;
@@ -10,6 +10,7 @@ class PlayerScreen extends StatefulWidget {
   final String category;
   final String videoUrl;
   final List<String> alternateVideoUrls;
+  final String contentType;
 
   const PlayerScreen({
     super.key,
@@ -18,6 +19,7 @@ class PlayerScreen extends StatefulWidget {
     required this.category,
     required this.videoUrl,
     this.alternateVideoUrls = const [],
+    this.contentType = '',
   });
 
   @override
@@ -25,23 +27,22 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  late final Player _player;
-  late final VideoController _videoController;
   late final Future<void> _openMediaFuture;
-  late final StreamSubscription<String> _errorSubscription;
-  late final StreamSubscription<Duration> _positionSubscription;
-  late final StreamSubscription<bool> _playingSubscription;
-  late final StreamSubscription<int?> _widthSubscription;
-  late final StreamSubscription<int?> _heightSubscription;
-  Timer? _startupTimer;
+  VideoPlayerController? _controller;
+  Timer? _loadingTimer;
+  Timer? _positionTimer;
+  Timer? _reconnectTimer;
 
   String? _errorMessage;
   String _activeVideoUrl = '';
+  String _activeRendererLabel = 'ExoPlayer PlatformView';
+  String _loadingStatus = 'Preparando stream...';
+  int _loadingSeconds = 0;
+  int _reconnectAttempts = 0;
   bool _hasStartedPlayback = false;
-  bool _isPlaying = false;
+  bool _isFullscreen = false;
+  bool _progressFocused = false;
   Duration _lastPosition = Duration.zero;
-  int? _videoWidth;
-  int? _videoHeight;
 
   static const Map<String, String> _iptvHeaders = {
     'User-Agent':
@@ -50,78 +51,58 @@ class _PlayerScreenState extends State<PlayerScreen> {
     'Connection': 'keep-alive',
   };
 
+  static const List<_RendererMode> _rendererModes = [
+    _RendererMode(
+      label: 'ExoPlayer PlatformView',
+      viewType: VideoViewType.platformView,
+    ),
+    _RendererMode(
+      label: 'ExoPlayer TextureView',
+      viewType: VideoViewType.textureView,
+    ),
+  ];
+
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    _videoController = VideoController(
-      _player,
-      configuration: const VideoControllerConfiguration(
-        vo: 'mediacodec_embed',
-        hwdec: 'mediacodec',
-        enableHardwareAcceleration: true,
-        androidAttachSurfaceAfterVideoParameters: false,
-      ),
-    );
-    _errorSubscription = _player.stream.error.listen((error) {
-      if (mounted) {
-        setState(() => _errorMessage = error);
-      }
-    });
-    _positionSubscription = _player.stream.position.listen((position) {
-      _lastPosition = position;
-      if (position > Duration.zero && mounted) {
-        _markPlaybackStarted();
-      }
-    });
-    _playingSubscription = _player.stream.playing.listen((playing) {
-      _isPlaying = playing;
-      if (playing && mounted) {
-        _markPlaybackStarted();
-      }
-    });
-    _widthSubscription = _player.stream.width.listen((width) {
-      _videoWidth = width;
-      _checkVideoFrameStarted();
-    });
-    _heightSubscription = _player.stream.height.listen((height) {
-      _videoHeight = height;
-      _checkVideoFrameStarted();
-    });
     _openMediaFuture = _openMedia();
   }
 
-  void _checkVideoFrameStarted() {
-    if ((_videoWidth ?? 0) > 0 && (_videoHeight ?? 0) > 0 && mounted) {
-      _markPlaybackStarted();
-    }
+  @override
+  void dispose() {
+    _stopLoadingTimer();
+    _positionTimer?.cancel();
+    _reconnectTimer?.cancel();
+    _controller?.removeListener(_onControllerChanged);
+    _controller?.dispose();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
   }
 
-  void _markPlaybackStarted() {
-    if (!_hasStartedPlayback && mounted) {
-      _startupTimer?.cancel();
-      setState(() {
-        _hasStartedPlayback = true;
-        _errorMessage = null;
-      });
-    }
+  bool get _isLiveContent {
+    final type = widget.contentType.toLowerCase();
+    final url = _activeVideoUrl.isNotEmpty ? _activeVideoUrl : widget.videoUrl;
+    final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    return type == 'live' || path.contains('/live/');
   }
 
-  String _streamKind(Uri uri) {
+  bool get _canSeek {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return false;
+    }
+    return !_isLiveContent && controller.value.duration > Duration.zero;
+  }
+
+  VideoFormat? _formatHint(Uri uri) {
     final path = uri.path.toLowerCase();
     if (path.endsWith('.m3u8')) {
-      return 'hls';
+      return VideoFormat.hls;
     }
-    if (path.endsWith('.ts')) {
-      return 'mpegts';
+    if (path.endsWith('.mpd')) {
+      return VideoFormat.dash;
     }
-    if (path.endsWith('.mp4')) {
-      return 'mp4';
-    }
-    if (path.endsWith('.mkv')) {
-      return 'mkv';
-    }
-    return 'auto';
+    return null;
   }
 
   Future<void> _openMedia() async {
@@ -137,12 +118,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     Object? lastError;
     for (var index = 0; index < candidates.length; index++) {
-      final candidate = candidates[index];
-      final ok = await _tryOpenCandidate(candidate, index, candidates.length);
-      if (ok) {
-        return;
+      for (final renderer in _rendererModes) {
+        final ok = await _tryOpenCandidate(
+          candidates[index],
+          index,
+          candidates.length,
+          renderer: renderer,
+        );
+        if (ok) {
+          return;
+        }
+        lastError = _errorMessage;
       }
-      lastError = _errorMessage;
     }
 
     if (mounted) {
@@ -156,69 +143,77 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<bool> _tryOpenCandidate(
     String url,
     int index,
-    int total,
-  ) async {
-    final videoUri = Uri.tryParse(url);
-
-    if (videoUri == null ||
-        !videoUri.hasScheme ||
-        !videoUri.hasAuthority ||
-        !['http', 'https'].contains(videoUri.scheme.toLowerCase())) {
+    int total, {
+    _RendererMode? renderer,
+    Duration? resumePosition,
+  }) async {
+    final activeRenderer = renderer ?? _rendererModes.first;
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        !uri.hasScheme ||
+        !uri.hasAuthority ||
+        !['http', 'https'].contains(uri.scheme.toLowerCase())) {
       setState(() => _errorMessage = 'URL do video invalida.');
       return false;
     }
 
+    _startLoadingTimer(
+      total > 1
+          ? 'Abrindo stream ${index + 1}/$total com ${activeRenderer.label}...'
+          : 'Abrindo stream com ${activeRenderer.label}...',
+    );
+    _activeVideoUrl = url;
+    _activeRendererLabel = activeRenderer.label;
+    _hasStartedPlayback = false;
+    _lastPosition = Duration.zero;
+    if (mounted) {
+      setState(() => _errorMessage = null);
+    }
+
+    VideoPlayerController? nextController;
     try {
-      _startupTimer?.cancel();
-      _hasStartedPlayback = false;
-      _isPlaying = false;
-      _lastPosition = Duration.zero;
-      _videoWidth = null;
-      _videoHeight = null;
-      _activeVideoUrl = url;
-      if (mounted) {
-        setState(() {
-          _errorMessage = null;
-        });
+      nextController = VideoPlayerController.networkUrl(
+        uri,
+        httpHeaders: _iptvHeaders,
+        formatHint: _formatHint(uri),
+        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+        viewType: activeRenderer.viewType,
+      );
+
+      _setLoadingStatus('Conectando ao servidor...');
+      await nextController.initialize().timeout(const Duration(seconds: 25));
+
+      final previous = _controller;
+      previous?.removeListener(_onControllerChanged);
+      _controller = nextController;
+      _controller!.addListener(_onControllerChanged);
+      await previous?.dispose();
+      nextController = null;
+
+      if (resumePosition != null &&
+          resumePosition > const Duration(seconds: 3) &&
+          !_isLiveContent) {
+        await _controller!.seekTo(resumePosition);
       }
 
-      final platform = _player.platform;
-      if (platform is NativePlayer) {
-        await platform.setProperty('cache', 'yes');
-        await platform.setProperty('demuxer-readahead-secs', '8');
-      }
-
-      await _player
-          .open(
-            Media(
-              url,
-              httpHeaders: _iptvHeaders,
-              extras: {
-                'streamKind': _streamKind(videoUri),
-              },
-            ),
-            play: true,
-          )
-          .timeout(const Duration(seconds: 20));
-
-      final started = await _waitForFirstFrame(const Duration(seconds: 25));
+      _setLoadingStatus('Iniciando video...');
+      await _controller!.play();
+      final started = await _waitForVideoStart(const Duration(seconds: 12));
       if (started) {
+        _markPlaybackStarted();
+        _startPositionTicker();
         return true;
       }
 
-      if (_hasStartedPlayback || _lastPosition > Duration.zero || _isPlaying) {
-        return true;
-      }
-
-      await _player.stop();
+      await _controller?.pause();
       if (mounted) {
         setState(() {
-          _errorMessage =
-              'Tentativa ${index + 1}/$total sem video. Testando proxima URL...';
+          _errorMessage = 'O video nao iniciou nesta URL.';
         });
       }
       return false;
     } catch (error) {
+      await nextController?.dispose();
       if (mounted) {
         setState(() => _errorMessage = 'Erro ao carregar o video: $error');
       }
@@ -226,82 +221,277 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  Future<bool> _waitForFirstFrame(Duration timeout) async {
-    final completer = Completer<bool>();
-    Timer? timer;
-    late final StreamSubscription<int?> widthSub;
-    late final StreamSubscription<int?> heightSub;
-
-    void completeIfReady() {
-      final hasVideoSize = (_videoWidth ?? 0) > 0 && (_videoHeight ?? 0) > 0;
-      final hasPlaybackProgress = _lastPosition > Duration.zero || _isPlaying;
-      if (hasVideoSize || hasPlaybackProgress) {
-        if (!completer.isCompleted) {
-          completer.complete(true);
-        }
+  Future<bool> _waitForVideoStart(Duration timeout) async {
+    final end = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(end)) {
+      final controller = _controller;
+      if (controller == null) {
+        return false;
       }
+      final value = controller.value;
+      if (value.hasError) {
+        return false;
+      }
+      if (value.isInitialized &&
+          value.size.width > 0 &&
+          value.size.height > 0) {
+        return true;
+      }
+      await Future.delayed(const Duration(milliseconds: 250));
     }
-
-    widthSub = _player.stream.width.listen((width) {
-      _videoWidth = width;
-      completeIfReady();
-    });
-    heightSub = _player.stream.height.listen((height) {
-      _videoHeight = height;
-      completeIfReady();
-    });
-    timer = Timer(timeout, () {
-      if (!completer.isCompleted) {
-        completer.complete(false);
-      }
-    });
-
-    completeIfReady();
-    final result = await completer.future;
-    timer.cancel();
-    await widthSub.cancel();
-    await heightSub.cancel();
-    return result;
+    return false;
   }
 
-  @override
-  void dispose() {
-    _startupTimer?.cancel();
-    _errorSubscription.cancel();
-    _positionSubscription.cancel();
-    _playingSubscription.cancel();
-    _widthSubscription.cancel();
-    _heightSubscription.cancel();
-    _player.dispose();
-    super.dispose();
+  void _onControllerChanged() {
+    final controller = _controller;
+    if (controller == null || !mounted) {
+      return;
+    }
+
+    final value = controller.value;
+    _lastPosition = value.position;
+
+    if (value.hasError) {
+      final error = value.errorDescription ?? 'Erro desconhecido no player.';
+      if (_hasStartedPlayback && _isRecoverableReadError(error)) {
+        _scheduleStreamRecovery(error);
+        return;
+      }
+      setState(() => _errorMessage = error);
+      return;
+    }
+
+    if (!_hasStartedPlayback &&
+        value.isInitialized &&
+        value.size.width > 0 &&
+        value.size.height > 0 &&
+        value.isPlaying) {
+      _markPlaybackStarted();
+      _startPositionTicker();
+    }
+  }
+
+  bool _isRecoverableReadError(String error) {
+    final lower = error.toLowerCase();
+    return lower.contains('source error') ||
+        lower.contains('behindlivewindow') ||
+        lower.contains('timeout') ||
+        lower.contains('connection') ||
+        lower.contains('eof') ||
+        lower.contains('read');
+  }
+
+  void _scheduleStreamRecovery(String error) {
+    if (_reconnectAttempts >= 3 || _reconnectTimer != null) {
+      setState(() => _errorMessage = error);
+      return;
+    }
+
+    _reconnectAttempts += 1;
+    _reconnectTimer = Timer(const Duration(seconds: 2), () async {
+      _reconnectTimer = null;
+      final url =
+          _activeVideoUrl.isNotEmpty ? _activeVideoUrl : widget.videoUrl;
+      if (!mounted || url.isEmpty) {
+        return;
+      }
+      await _tryOpenCandidate(
+        url,
+        0,
+        1,
+        renderer: _activeRendererMode,
+        resumePosition: _lastPosition,
+      );
+    });
+  }
+
+  void _startLoadingTimer(String status) {
+    _loadingTimer?.cancel();
+    _loadingSeconds = 0;
+    _loadingStatus = status;
+    _loadingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && !_hasStartedPlayback) {
+        setState(() => _loadingSeconds += 1);
+      }
+    });
+  }
+
+  void _stopLoadingTimer() {
+    _loadingTimer?.cancel();
+    _loadingTimer = null;
+  }
+
+  void _setLoadingStatus(String status) {
+    if (mounted && _loadingStatus != status) {
+      setState(() => _loadingStatus = status);
+    }
+  }
+
+  void _markPlaybackStarted() {
+    if (!_hasStartedPlayback && mounted) {
+      _stopLoadingTimer();
+      setState(() {
+        _hasStartedPlayback = true;
+        _errorMessage = null;
+      });
+    }
+  }
+
+  void _startPositionTicker() {
+    _positionTimer?.cancel();
+    _positionTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) {
+        setState(() {
+          _lastPosition = _controller?.value.position ?? _lastPosition;
+        });
+      }
+    });
   }
 
   void _togglePlayPause() {
-    _player.playOrPause();
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+    controller.value.isPlaying ? controller.pause() : controller.play();
+    setState(() {});
+  }
+
+  void _toggleFullscreen() {
+    setState(() => _isFullscreen = !_isFullscreen);
+    SystemChrome.setEnabledSystemUIMode(
+      _isFullscreen ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+    );
+  }
+
+  Future<void> _seekBy(Duration delta) async {
+    final controller = _controller;
+    if (controller == null || !_canSeek) {
+      return;
+    }
+
+    final duration = controller.value.duration;
+    var target = controller.value.position + delta;
+    if (target < Duration.zero) {
+      target = Duration.zero;
+    }
+    if (duration > Duration.zero && target > duration) {
+      target = duration;
+    }
+    await controller.seekTo(target);
+  }
+
+  Future<void> _seekTo(Duration position) async {
+    final controller = _controller;
+    if (controller != null && _canSeek) {
+      await controller.seekTo(position);
+    }
+  }
+
+  _RendererMode get _activeRendererMode {
+    return _rendererModes.firstWhere(
+      (renderer) => renderer.label == _activeRendererLabel,
+      orElse: () => _rendererModes.first,
+    );
+  }
+
+  _RendererMode get _nextRendererMode {
+    final currentIndex = _rendererModes.indexWhere(
+      (renderer) => renderer.label == _activeRendererLabel,
+    );
+    final nextIndex =
+        currentIndex < 0 ? 0 : (currentIndex + 1) % _rendererModes.length;
+    return _rendererModes[nextIndex];
+  }
+
+  Future<void> _switchRendererMode() async {
+    final url = _activeVideoUrl.isNotEmpty ? _activeVideoUrl : widget.videoUrl;
+    if (url.isEmpty) {
+      return;
+    }
+    await _tryOpenCandidate(
+      url,
+      0,
+      1,
+      renderer: _nextRendererMode,
+      resumePosition: _lastPosition,
+    );
+  }
+
+  String _formatTime(Duration duration) {
+    final totalSeconds = duration.inSeconds;
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    final seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+    }
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
   Widget _buildLoadingOverlay() {
     return Container(
-      color: Colors.black54,
+      color: Colors.black87,
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(color: Color(0xFF6A00FF)),
-            const SizedBox(height: 16),
-            const Text(
-              'Carregando stream...',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
+        child: Container(
+          width: 360,
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: const Color(0xFF101216),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: const Color(0xFF6A00FF)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x886A00FF),
+                blurRadius: 28,
+                spreadRadius: 1,
               ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'video ${_videoWidth ?? 0}x${_videoHeight ?? 0} | ${_lastPosition.inSeconds}s',
-              style: const TextStyle(color: Colors.white54, fontSize: 11),
-            ),
-          ],
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 42,
+                height: 42,
+                child: CircularProgressIndicator(
+                  color: Color(0xFFB47CFF),
+                  strokeWidth: 4,
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'ORIO PLAYER',
+                style: TextStyle(
+                  color: Color(0xFFB47CFF),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.4,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _loadingStatus,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Aguarde, o stream pode levar alguns segundos para iniciar.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white60, fontSize: 12),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                '${_loadingSeconds}s | $_activeRendererLabel',
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -314,153 +504,304 @@ class _PlayerScreenState extends State<PlayerScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            Container(
-              height: 88,
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: const BoxDecoration(
-                color: Color(0xFF090A0F),
-                border: Border(bottom: BorderSide(color: Colors.white10)),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          widget.subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.of(context).pop(),
-                  )
-                ],
-              ),
-            ),
+            if (!_isFullscreen) _buildHeader(),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Center(
-                  child: Container(
-                    width: 940,
-                    height: 520,
-                    clipBehavior: Clip.antiAlias,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF101216),
-                      borderRadius: BorderRadius.circular(28),
-                      border: Border.all(color: Colors.white10),
-                    ),
-                    child: FutureBuilder<void>(
-                      future: _openMediaFuture,
-                      builder: (context, snapshot) {
-                        final hasError =
-                            _errorMessage != null || snapshot.hasError;
+                padding: EdgeInsets.all(_isFullscreen ? 0 : 24),
+                child: LayoutBuilder(
+                  builder: (context, outerConstraints) {
+                    final playerWidth = _isFullscreen
+                        ? outerConstraints.maxWidth
+                        : outerConstraints.maxWidth.clamp(0.0, 940.0);
+                    final playerHeight = _isFullscreen
+                        ? outerConstraints.maxHeight
+                        : outerConstraints.maxHeight.clamp(0.0, 520.0);
 
-                        if (hasError) {
-                          return _buildErrorMessage(snapshot.error);
-                        }
+                    return Center(
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        width: playerWidth,
+                        height: playerHeight,
+                        clipBehavior: Clip.antiAlias,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF101216),
+                          borderRadius: BorderRadius.circular(
+                            _isFullscreen ? 0 : 28,
+                          ),
+                          border: _isFullscreen
+                              ? null
+                              : Border.all(color: Colors.white10),
+                        ),
+                        child: FutureBuilder<void>(
+                          future: _openMediaFuture,
+                          builder: (context, snapshot) {
+                            final hasError =
+                                _errorMessage != null || snapshot.hasError;
+                            if (hasError) {
+                              return _buildErrorMessage(snapshot.error);
+                            }
 
-                        return Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            Positioned.fill(
-                              child: LayoutBuilder(
-                                builder: (context, constraints) {
-                                  return Video(
-                                    controller: _videoController,
-                                    width: constraints.maxWidth,
-                                    height: constraints.maxHeight,
-                                    fit: BoxFit.contain,
-                                    fill: Colors.black,
-                                    controls: (state) =>
-                                        const SizedBox.shrink(),
-                                  );
-                                },
-                              ),
-                            ),
-                            StreamBuilder<bool>(
-                              stream: _player.stream.buffering,
-                              initialData: _player.state.buffering,
-                              builder: (context, bufferingSnapshot) {
-                                if (_hasStartedPlayback) {
-                                  return const SizedBox.shrink();
-                                }
-
-                                return _buildLoadingOverlay();
-                              },
-                            ),
-                            Positioned(
-                              bottom: 24,
-                              left: 24,
-                              right: 24,
-                              child: Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      widget.category,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 14,
-                                      ),
-                                    ),
+                            return Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                Positioned.fill(
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: _toggleFullscreen,
+                                    child: _buildVideo(),
                                   ),
-                                  StreamBuilder<bool>(
-                                    stream: _player.stream.playing,
-                                    initialData: _player.state.playing,
-                                    builder: (context, playingSnapshot) {
-                                      final isPlaying =
-                                          playingSnapshot.data == true;
-
-                                      return IconButton(
-                                        icon: Icon(
-                                          isPlaying
-                                              ? Icons.pause_circle_filled
-                                              : Icons.play_circle_filled,
-                                          color: Colors.white,
-                                          size: 40,
-                                        ),
-                                        onPressed: _togglePlayPause,
-                                      );
-                                    },
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        );
-                      },
-                    ),
-                  ),
+                                ),
+                                if (!_hasStartedPlayback)
+                                  _buildLoadingOverlay(),
+                                Positioned(
+                                  bottom: 0,
+                                  left: 0,
+                                  right: 0,
+                                  child: _buildControlsOverlay(),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVideo() {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return const ColoredBox(color: Colors.black);
+    }
+
+    return FittedBox(
+      fit: BoxFit.contain,
+      child: SizedBox(
+        width: controller.value.size.width,
+        height: controller.value.size.height,
+        child: VideoPlayer(controller),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      height: 84,
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      decoration: const BoxDecoration(
+        color: Color(0xFF090A0F),
+        border: Border(bottom: BorderSide(color: Colors.white10)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  widget.subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            onPressed: () => Navigator.of(context).pop(),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlsOverlay() {
+    final controller = _controller;
+    final duration = controller?.value.duration ?? Duration.zero;
+    final position = controller?.value.position ?? _lastPosition;
+    final canSeek = _canSeek && duration > Duration.zero;
+    final isPlaying = controller?.value.isPlaying == true;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.transparent, Color(0xDD000000)],
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (canSeek) _buildProgressControl(position, duration),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _canSeek
+                      ? '${_formatTime(position)} / ${duration > Duration.zero ? _formatTime(duration) : '--:--'}'
+                      : 'Ao vivo - ${widget.category}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                'Modo: $_activeRendererLabel',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (canSeek)
+                IconButton(
+                  icon: const Icon(
+                    Icons.replay_10,
+                    color: Colors.white,
+                    size: 34,
+                  ),
+                  onPressed: () => _seekBy(const Duration(seconds: -10)),
+                ),
+              IconButton(
+                icon: Icon(
+                  isPlaying
+                      ? Icons.pause_circle_filled
+                      : Icons.play_circle_filled,
+                  color: Colors.white,
+                  size: 42,
+                ),
+                onPressed: _togglePlayPause,
+              ),
+              if (canSeek)
+                IconButton(
+                  icon: const Icon(
+                    Icons.forward_10,
+                    color: Colors.white,
+                    size: 34,
+                  ),
+                  onPressed: () => _seekBy(const Duration(seconds: 10)),
+                ),
+              IconButton(
+                tooltip: 'Trocar modo de video',
+                icon: const Icon(
+                  Icons.tune,
+                  color: Colors.white,
+                  size: 30,
+                ),
+                onPressed: _switchRendererMode,
+              ),
+              IconButton(
+                icon: Icon(
+                  _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                  color: Colors.white,
+                  size: 34,
+                ),
+                onPressed: _toggleFullscreen,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProgressControl(Duration position, Duration duration) {
+    final progress = duration.inMilliseconds <= 0
+        ? 0.0
+        : (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
+
+    return FocusableActionDetector(
+      mouseCursor: SystemMouseCursors.click,
+      onFocusChange: (focused) => setState(() => _progressFocused = focused),
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.arrowLeft): _SeekIntent(-10),
+        SingleActivator(LogicalKeyboardKey.arrowRight): _SeekIntent(10),
+        SingleActivator(LogicalKeyboardKey.select): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.gameButtonA): ActivateIntent(),
+      },
+      actions: {
+        _SeekIntent: CallbackAction<_SeekIntent>(
+          onInvoke: (intent) {
+            _seekBy(Duration(seconds: intent.seconds));
+            return null;
+          },
+        ),
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            _togglePlayPause();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (details) {
+          final box = context.findRenderObject() as RenderBox?;
+          if (box == null) {
+            return;
+          }
+          final local = box.globalToLocal(details.globalPosition);
+          final ratio = (local.dx / box.size.width).clamp(0.0, 1.0);
+          _seekTo(Duration(
+            milliseconds: (duration.inMilliseconds * ratio).round(),
+          ));
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          height: 30,
+          padding: const EdgeInsets.symmetric(vertical: 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color:
+                  _progressFocused ? const Color(0xFFB47CFF) : Colors.white10,
+              width: _progressFocused ? 2 : 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Container(color: Colors.white24),
+                FractionallySizedBox(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: progress,
+                  child: Container(color: const Color(0xFFB47CFF)),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -482,7 +823,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ),
             const SizedBox(height: 14),
             Text(
-              'URL: $_activeVideoUrl\nDimensao: ${_videoWidth ?? 0}x${_videoHeight ?? 0} | Posicao: ${_lastPosition.inSeconds}s',
+              'Modo: $_activeRendererLabel | URL: $_activeVideoUrl\nPosicao: ${_lastPosition.inSeconds}s',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.center,
@@ -493,4 +834,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
     );
   }
+}
+
+class _SeekIntent extends Intent {
+  final int seconds;
+
+  const _SeekIntent(this.seconds);
+}
+
+class _RendererMode {
+  final String label;
+  final VideoViewType viewType;
+
+  const _RendererMode({
+    required this.label,
+    required this.viewType,
+  });
 }
