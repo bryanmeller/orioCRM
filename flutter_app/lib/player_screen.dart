@@ -32,6 +32,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _loadingTimer;
   Timer? _positionTimer;
   Timer? _reconnectTimer;
+  Timer? _controlsTimer;
+  final FocusNode _playerFocusNode = FocusNode();
+  final FocusNode _rewindFocusNode = FocusNode();
+  final FocusNode _playPauseFocusNode = FocusNode();
+  final FocusNode _forwardFocusNode = FocusNode();
+  final FocusNode _rendererFocusNode = FocusNode();
+  final FocusNode _fullscreenFocusNode = FocusNode();
 
   String? _errorMessage;
   String _activeVideoUrl = '';
@@ -40,7 +47,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _loadingSeconds = 0;
   int _reconnectAttempts = 0;
   bool _hasStartedPlayback = false;
-  bool _isFullscreen = false;
+  bool _isFullscreen = true;
+  bool _controlsVisible = true;
   bool _progressFocused = false;
   Duration _lastPosition = Duration.zero;
 
@@ -65,6 +73,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _playerFocusNode.requestFocus();
+        _scheduleControlsHide();
+      }
+    });
     _openMediaFuture = _openMedia();
   }
 
@@ -73,6 +88,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _stopLoadingTimer();
     _positionTimer?.cancel();
     _reconnectTimer?.cancel();
+    _controlsTimer?.cancel();
+    _playerFocusNode.dispose();
+    _rewindFocusNode.dispose();
+    _playPauseFocusNode.dispose();
+    _forwardFocusNode.dispose();
+    _rendererFocusNode.dispose();
+    _fullscreenFocusNode.dispose();
     _controller?.removeListener(_onControllerChanged);
     _controller?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -334,6 +356,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _hasStartedPlayback = true;
         _errorMessage = null;
       });
+      if (_controlsVisible) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _playPauseFocusNode.requestFocus();
+          }
+        });
+      }
+      _scheduleControlsHide();
     }
   }
 
@@ -355,13 +385,57 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     controller.value.isPlaying ? controller.pause() : controller.play();
     setState(() {});
+    _scheduleControlsHide();
   }
 
   void _toggleFullscreen() {
-    setState(() => _isFullscreen = !_isFullscreen);
+    setState(() {
+      _isFullscreen = !_isFullscreen;
+      _controlsVisible = true;
+    });
     SystemChrome.setEnabledSystemUIMode(
       _isFullscreen ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
     );
+    _scheduleControlsHide();
+  }
+
+  void _showControls({bool autoHide = true}) {
+    final wasHidden = !_controlsVisible;
+    if (mounted) {
+      setState(() => _controlsVisible = true);
+    }
+    if (wasHidden) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _playPauseFocusNode.requestFocus();
+        }
+      });
+    }
+    if (autoHide) {
+      _scheduleControlsHide();
+    }
+  }
+
+  void _scheduleControlsHide() {
+    _controlsTimer?.cancel();
+    if (!_isFullscreen || !_hasStartedPlayback) {
+      return;
+    }
+    _controlsTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted && _isFullscreen && _hasStartedPlayback) {
+        setState(() => _controlsVisible = false);
+      }
+    });
+  }
+
+  KeyEventResult _handlePlayerKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    final wasHidden = !_controlsVisible;
+    _showControls();
+    return wasHidden ? KeyEventResult.handled : KeyEventResult.ignored;
   }
 
   Future<void> _seekBy(Duration delta) async {
@@ -379,12 +453,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
       target = duration;
     }
     await controller.seekTo(target);
+    _scheduleControlsHide();
   }
 
   Future<void> _seekTo(Duration position) async {
     final controller = _controller;
     if (controller != null && _canSeek) {
       await controller.seekTo(position);
+      _scheduleControlsHide();
     }
   }
 
@@ -416,6 +492,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       renderer: _nextRendererMode,
       resumePosition: _lastPosition,
     );
+    _showControls();
   }
 
   String _formatTime(Duration duration) {
@@ -501,75 +578,88 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Column(
-          children: [
-            if (!_isFullscreen) _buildHeader(),
-            Expanded(
-              child: Padding(
-                padding: EdgeInsets.all(_isFullscreen ? 0 : 24),
-                child: LayoutBuilder(
-                  builder: (context, outerConstraints) {
-                    final playerWidth = _isFullscreen
-                        ? outerConstraints.maxWidth
-                        : outerConstraints.maxWidth.clamp(0.0, 940.0);
-                    final playerHeight = _isFullscreen
-                        ? outerConstraints.maxHeight
-                        : outerConstraints.maxHeight.clamp(0.0, 520.0);
+      body: Focus(
+        focusNode: _playerFocusNode,
+        autofocus: true,
+        onKeyEvent: _handlePlayerKey,
+        child: SafeArea(
+          child: Column(
+            children: [
+              if (!_isFullscreen) _buildHeader(),
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.all(_isFullscreen ? 0 : 24),
+                  child: LayoutBuilder(
+                    builder: (context, outerConstraints) {
+                      final playerWidth = _isFullscreen
+                          ? outerConstraints.maxWidth
+                          : outerConstraints.maxWidth.clamp(0.0, 940.0);
+                      final playerHeight = _isFullscreen
+                          ? outerConstraints.maxHeight
+                          : outerConstraints.maxHeight.clamp(0.0, 520.0);
 
-                    return Center(
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        width: playerWidth,
-                        height: playerHeight,
-                        clipBehavior: Clip.antiAlias,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF101216),
-                          borderRadius: BorderRadius.circular(
-                            _isFullscreen ? 0 : 28,
+                      return Center(
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          width: playerWidth,
+                          height: playerHeight,
+                          clipBehavior: Clip.antiAlias,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF101216),
+                            borderRadius: BorderRadius.circular(
+                              _isFullscreen ? 0 : 28,
+                            ),
+                            border: _isFullscreen
+                                ? null
+                                : Border.all(color: Colors.white10),
                           ),
-                          border: _isFullscreen
-                              ? null
-                              : Border.all(color: Colors.white10),
-                        ),
-                        child: FutureBuilder<void>(
-                          future: _openMediaFuture,
-                          builder: (context, snapshot) {
-                            final hasError =
-                                _errorMessage != null || snapshot.hasError;
-                            if (hasError) {
-                              return _buildErrorMessage(snapshot.error);
-                            }
+                          child: FutureBuilder<void>(
+                            future: _openMediaFuture,
+                            builder: (context, snapshot) {
+                              final hasError =
+                                  _errorMessage != null || snapshot.hasError;
+                              if (hasError) {
+                                return _buildErrorMessage(snapshot.error);
+                              }
 
-                            return Stack(
-                              alignment: Alignment.center,
-                              children: [
-                                Positioned.fill(
-                                  child: GestureDetector(
-                                    behavior: HitTestBehavior.opaque,
-                                    onTap: _toggleFullscreen,
-                                    child: _buildVideo(),
+                              return Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  Positioned.fill(
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () {
+                                        if (_isFullscreen &&
+                                            !_controlsVisible) {
+                                          _showControls();
+                                          return;
+                                        }
+                                        _toggleFullscreen();
+                                      },
+                                      child: _buildVideo(),
+                                    ),
                                   ),
-                                ),
-                                if (!_hasStartedPlayback)
-                                  _buildLoadingOverlay(),
-                                Positioned(
-                                  bottom: 0,
-                                  left: 0,
-                                  right: 0,
-                                  child: _buildControlsOverlay(),
-                                ),
-                              ],
-                            );
-                          },
+                                  if (!_hasStartedPlayback)
+                                    _buildLoadingOverlay(),
+                                  if (!_isFullscreen || _controlsVisible)
+                                    Positioned(
+                                      bottom: 0,
+                                      left: 0,
+                                      right: 0,
+                                      child: _buildControlsOverlay(),
+                                    ),
+                                ],
+                              );
+                            },
+                          ),
                         ),
-                      ),
-                    );
-                  },
+                      );
+                    },
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -651,85 +741,93 @@ class _PlayerScreenState extends State<PlayerScreen> {
           colors: [Colors.transparent, Color(0xDD000000)],
         ),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (canSeek) _buildProgressControl(position, duration),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  _canSeek
-                      ? '${_formatTime(position)} / ${duration > Duration.zero ? _formatTime(duration) : '--:--'}'
-                      : 'Ao vivo - ${widget.category}',
+      child: FocusTraversalGroup(
+        policy: ReadingOrderTraversalPolicy(),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canSeek) _buildProgressControl(position, duration),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _canSeek
+                        ? '${_formatTime(position)} / ${duration > Duration.zero ? _formatTime(duration) : '--:--'}'
+                        : 'Ao vivo - ${widget.category}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Text(
+                  'Modo: $_activeRendererLabel',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
+                    color: Colors.white38,
+                    fontSize: 11,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-              ),
-              Text(
-                'Modo: $_activeRendererLabel',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (canSeek)
+                const SizedBox(width: 8),
+                if (canSeek)
+                  IconButton(
+                    focusNode: _rewindFocusNode,
+                    icon: const Icon(
+                      Icons.replay_10,
+                      color: Colors.white,
+                      size: 34,
+                    ),
+                    onPressed: () => _seekBy(const Duration(seconds: -10)),
+                  ),
                 IconButton(
+                  focusNode: _playPauseFocusNode,
+                  icon: Icon(
+                    isPlaying
+                        ? Icons.pause_circle_filled
+                        : Icons.play_circle_filled,
+                    color: Colors.white,
+                    size: 42,
+                  ),
+                  onPressed: _togglePlayPause,
+                ),
+                if (canSeek)
+                  IconButton(
+                    focusNode: _forwardFocusNode,
+                    icon: const Icon(
+                      Icons.forward_10,
+                      color: Colors.white,
+                      size: 34,
+                    ),
+                    onPressed: () => _seekBy(const Duration(seconds: 10)),
+                  ),
+                IconButton(
+                  focusNode: _rendererFocusNode,
+                  tooltip: 'Trocar modo de video',
                   icon: const Icon(
-                    Icons.replay_10,
+                    Icons.tune,
+                    color: Colors.white,
+                    size: 30,
+                  ),
+                  onPressed: _switchRendererMode,
+                ),
+                IconButton(
+                  focusNode: _fullscreenFocusNode,
+                  icon: Icon(
+                    _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
                     color: Colors.white,
                     size: 34,
                   ),
-                  onPressed: () => _seekBy(const Duration(seconds: -10)),
+                  onPressed: _toggleFullscreen,
                 ),
-              IconButton(
-                icon: Icon(
-                  isPlaying
-                      ? Icons.pause_circle_filled
-                      : Icons.play_circle_filled,
-                  color: Colors.white,
-                  size: 42,
-                ),
-                onPressed: _togglePlayPause,
-              ),
-              if (canSeek)
-                IconButton(
-                  icon: const Icon(
-                    Icons.forward_10,
-                    color: Colors.white,
-                    size: 34,
-                  ),
-                  onPressed: () => _seekBy(const Duration(seconds: 10)),
-                ),
-              IconButton(
-                tooltip: 'Trocar modo de video',
-                icon: const Icon(
-                  Icons.tune,
-                  color: Colors.white,
-                  size: 30,
-                ),
-                onPressed: _switchRendererMode,
-              ),
-              IconButton(
-                icon: Icon(
-                  _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                  color: Colors.white,
-                  size: 34,
-                ),
-                onPressed: _toggleFullscreen,
-              ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
