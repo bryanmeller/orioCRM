@@ -1,5 +1,7 @@
- flutter devives
+flutter devives
 
- flutter run -d emulator-5554 
+flutter run -d emulator-5554 
 
- 
+flutter build apk --release
+
+

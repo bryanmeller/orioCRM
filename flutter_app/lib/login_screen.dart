@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:android_tv_text_field/native_textfield_tv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_service.dart';
 import 'server_selection_screen.dart';
@@ -14,20 +15,17 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _codeController = TextEditingController();
-  final _userController = TextEditingController();
-  final _passController = TextEditingController();
+  final _codeController = NativeTextFieldController();
+  final _userController = NativeTextFieldController();
+  final _passController = NativeTextFieldController();
 
   final _codeFocusNode = FocusNode();
   final _userFocusNode = FocusNode();
   final _passFocusNode = FocusNode();
   final _loginFocusNode = FocusNode();
-  final _firstKeyboardKeyFocusNode = FocusNode();
 
   bool _isLoading = false;
   String? _errorMessage;
-  int _activeFieldIndex = 0;
-  bool _shiftKeyboard = false;
 
   @override
   void initState() {
@@ -53,63 +51,7 @@ class _LoginScreenState extends State<LoginScreen> {
     _userFocusNode.dispose();
     _passFocusNode.dispose();
     _loginFocusNode.dispose();
-    _firstKeyboardKeyFocusNode.dispose();
     super.dispose();
-  }
-
-  TextEditingController get _activeController {
-    return [
-      _codeController,
-      _userController,
-      _passController
-    ][_activeFieldIndex];
-  }
-
-  FocusNode get _activeFieldFocusNode {
-    return [_codeFocusNode, _userFocusNode, _passFocusNode][_activeFieldIndex];
-  }
-
-  void _selectField(int index, {bool moveToKeyboard = false}) {
-    setState(() => _activeFieldIndex = index);
-    final targetFocus =
-        moveToKeyboard ? _firstKeyboardKeyFocusNode : _activeFieldFocusNode;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        targetFocus.requestFocus();
-      }
-    });
-  }
-
-  void _appendToActiveField(String value) {
-    final controller = _activeController;
-    controller.text = '${controller.text}$value';
-    controller.selection =
-        TextSelection.collapsed(offset: controller.text.length);
-    setState(() {});
-  }
-
-  void _backspaceActiveField() {
-    final controller = _activeController;
-    if (controller.text.isEmpty) {
-      return;
-    }
-    controller.text = controller.text.substring(0, controller.text.length - 1);
-    controller.selection =
-        TextSelection.collapsed(offset: controller.text.length);
-    setState(() {});
-  }
-
-  void _clearActiveField() {
-    _activeController.clear();
-    setState(() {});
-  }
-
-  void _goToNextLoginTarget() {
-    if (_activeFieldIndex < 2) {
-      _selectField(_activeFieldIndex + 1);
-    } else {
-      _loginFocusNode.requestFocus();
-    }
   }
 
   Future<void> _handleLogin() async {
@@ -374,33 +316,27 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             const SizedBox(height: 14),
           ],
-          _buildTvTextField(
-            index: 0,
+          _buildNativeInputField(
             label: 'Codigo',
-            icon: Icons.vpn_key,
             controller: _codeController,
             focusNode: _codeFocusNode,
-            autofocus: true,
+            nextFocusNode: _userFocusNode,
           ),
           const SizedBox(height: 12),
-          _buildTvTextField(
-            index: 1,
+          _buildNativeInputField(
             label: 'Usuario',
-            icon: Icons.person,
             controller: _userController,
             focusNode: _userFocusNode,
+            nextFocusNode: _passFocusNode,
           ),
           const SizedBox(height: 12),
-          _buildTvTextField(
-            index: 2,
+          _buildNativeInputField(
             label: 'Senha',
-            icon: Icons.lock,
             controller: _passController,
             focusNode: _passFocusNode,
+            nextFocusNode: _loginFocusNode,
             obscure: true,
           ),
-          const SizedBox(height: 16),
-          _buildTvKeyboard(),
           const SizedBox(height: 16),
           TvFocusable(
             focusNode: _loginFocusNode,
@@ -443,174 +379,29 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  Widget _buildTvTextField({
-    required int index,
+  Widget _buildNativeInputField({
     required String label,
-    required IconData icon,
-    required TextEditingController controller,
+    required NativeTextFieldController controller,
     required FocusNode focusNode,
-    bool autofocus = false,
+    FocusNode? nextFocusNode,
     bool obscure = false,
   }) {
-    final value = controller.text;
-    final isActive = _activeFieldIndex == index;
-    final displayValue = obscure && value.isNotEmpty
-        ? List.filled(
-                value.length.clamp(4, 12).toInt(), String.fromCharCode(8226))
-            .join()
-        : value;
-
-    return TvFocusable(
-      focusNode: focusNode,
-      autofocus: autofocus,
-      onPressed: () => _selectField(index, moveToKeyboard: true),
-      onFocusChange: (focused) {
-        if (focused && _activeFieldIndex != index) {
-          setState(() => _activeFieldIndex = index);
-        }
-      },
-      builder: (context, focused) => AnimatedContainer(
-        duration: const Duration(milliseconds: 140),
-        height: 62,
-        padding: const EdgeInsets.symmetric(horizontal: 18),
-        decoration: tvFocusDecoration(
-          focused: focused || isActive,
-          baseColor: const Color(0xFF14141A),
-          radius: 16,
-          borderColor: Colors.white12,
-          focusedColor:
-              focused ? const Color(0xFFB47CFF) : const Color(0xFF6A00FF),
-        ),
-        child: Row(
-          children: [
-            Icon(icon,
-                color: focused || isActive
-                    ? const Color(0xFFB47CFF)
-                    : Colors.grey),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Text(
-                displayValue.isEmpty ? label : displayValue,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: displayValue.isEmpty ? Colors.white54 : Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTvKeyboard() {
-    final rows = _shiftKeyboard
-        ? const [
-            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
-            ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
-            ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
-            ['Z', 'X', 'C', 'V', 'B', 'N', 'M', '.', '_'],
-          ]
-        : const [
-            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
-            ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
-            ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
-            ['z', 'x', 'c', 'v', 'b', 'n', 'm', '.', '_'],
-          ];
-
-    return FocusTraversalGroup(
-      policy: ReadingOrderTraversalPolicy(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (var rowIndex = 0; rowIndex < rows.length; rowIndex++) ...[
-            Row(
-              children: [
-                for (var keyIndex = 0;
-                    keyIndex < rows[rowIndex].length;
-                    keyIndex++) ...[
-                  Expanded(
-                    child: _buildKeyboardKey(
-                      rows[rowIndex][keyIndex],
-                      focusNode: rowIndex == 0 && keyIndex == 0
-                          ? _firstKeyboardKeyFocusNode
-                          : null,
-                      onPressed: () =>
-                          _appendToActiveField(rows[rowIndex][keyIndex]),
-                    ),
-                  ),
-                  if (keyIndex < rows[rowIndex].length - 1)
-                    const SizedBox(width: 6),
-                ],
-              ],
-            ),
-            const SizedBox(height: 6),
-          ],
-          Row(
-            children: [
-              Expanded(
-                child: _buildKeyboardKey(
-                  _shiftKeyboard ? 'abc' : 'ABC',
-                  onPressed: () =>
-                      setState(() => _shiftKeyboard = !_shiftKeyboard),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                  flex: 2,
-                  child: _buildKeyboardKey('Espaco',
-                      onPressed: () => _appendToActiveField(' '))),
-              const SizedBox(width: 6),
-              Expanded(
-                  child: _buildKeyboardKey('Apagar',
-                      onPressed: _backspaceActiveField)),
-              const SizedBox(width: 6),
-              Expanded(
-                  child: _buildKeyboardKey('Limpar',
-                      onPressed: _clearActiveField)),
-              const SizedBox(width: 6),
-              Expanded(
-                  child: _buildKeyboardKey('Proximo',
-                      onPressed: _goToNextLoginTarget)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildKeyboardKey(
-    String label, {
-    required VoidCallback onPressed,
-    FocusNode? focusNode,
-  }) {
-    return TvFocusable(
-      focusNode: focusNode,
-      onPressed: onPressed,
-      builder: (context, focused) => AnimatedContainer(
-        duration: const Duration(milliseconds: 110),
-        height: 34,
-        alignment: Alignment.center,
-        decoration: tvFocusDecoration(
-          focused: focused,
-          baseColor: focused ? Colors.white : const Color(0xFF1A1B22),
-          radius: 8,
-          borderColor: Colors.white10,
-          focusedColor: const Color(0xFFB47CFF),
-        ),
-        child: Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: focused ? const Color(0xFF6A00FF) : Colors.white,
-            fontSize: label.length > 6 ? 10 : 13,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
+    return SizedBox(
+      height: 64,
+      child: AndroidTVTextField(
+        focusNode: focusNode,
+        controller: controller,
+        hint: label,
+        obscureText: obscure,
+        onSubmitted: (_) {
+          if (nextFocusNode != null) {
+            nextFocusNode.requestFocus();
+            return;
+          }
+          _handleLogin();
+        },
+        backgroundColor: const Color(0xFF14141A),
+        textColor: Colors.white,
       ),
     );
   }

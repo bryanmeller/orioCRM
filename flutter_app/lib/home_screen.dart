@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:android_tv_text_field/native_textfield_tv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_service.dart';
@@ -33,7 +34,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String _selectedCategory = 'todos';
   String _searchQuery = '';
   IptvContentItem? _selectedItem;
-  final TextEditingController _searchController = TextEditingController();
+  final NativeTextFieldController _searchController =
+      NativeTextFieldController();
+  final FocusNode _searchFocusNode = FocusNode();
 
   IptvCatalog _liveCatalog = const IptvCatalog(categories: [], items: []);
   IptvCatalog _movieCatalog = const IptvCatalog(categories: [], items: []);
@@ -48,6 +51,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _searchFocusNode.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -171,9 +175,9 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  void _updateSearch(String value) {
+  void _applySearch(String value) {
     setState(() {
-      _searchQuery = value;
+      _searchQuery = value.trim();
       final items = _filteredItems;
       _selectedItem = items.isNotEmpty ? items.first : null;
     });
@@ -181,7 +185,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _clearSearch() {
     _searchController.clear();
-    _updateSearch('');
+    _applySearch('');
   }
 
   String _searchableText(IptvContentItem item) {
@@ -497,8 +501,6 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           _buildCatalogSummary(),
           const SizedBox(height: 12),
-          _buildSearchBar(),
-          const SizedBox(height: 12),
           _buildCategoryRail(_activeCatalog.categories),
           const SizedBox(height: 12),
           Expanded(child: _buildCatalogList(_filteredItems)),
@@ -730,34 +732,29 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return SizedBox(
       height: compact ? 48 : 52,
-      child: TextField(
+      child: AndroidTVTextField(
+        key: ValueKey('search-${_activeSection.name}'),
+        focusNode: _searchFocusNode,
         controller: _searchController,
-        onChanged: _updateSearch,
-        textInputAction: TextInputAction.search,
-        style: const TextStyle(color: Colors.white, fontSize: 14),
-        decoration: InputDecoration(
-          hintText: 'Pesquisar $sectionName',
-          hintStyle: const TextStyle(color: Colors.white38),
-          prefixIcon: const Icon(Icons.search, color: Color(0xFFB47CFF)),
-          suffixIcon: _searchQuery.isEmpty
-              ? null
-              : IconButton(
-                  onPressed: _clearSearch,
-                  icon: const Icon(Icons.close, color: Colors.white54),
+        height: compact ? 48 : 52,
+        hint: 'Pesquisar $sectionName',
+        backgroundColor: const Color(0xFF101216),
+        textColor: Colors.white,
+        focuesedBorderColor: const Color(0xFFB47CFF),
+        unFocuesedBorderColor: Colors.white10,
+        onSubmitted: _applySearch,
+        postFixWidget: _searchQuery.isEmpty
+            ? const Icon(Icons.search, color: Color(0xFFB47CFF), size: 22)
+            : IconButton(
+                onPressed: _clearSearch,
+                icon: const Icon(Icons.close, color: Colors.white54),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints.tightFor(
+                  width: 36,
+                  height: 36,
                 ),
-          filled: true,
-          fillColor: const Color(0xFF101216),
-          contentPadding:
-              EdgeInsets.symmetric(horizontal: 16, vertical: compact ? 12 : 14),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Colors.white10),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Color(0xFFB47CFF), width: 2),
-          ),
-        ),
+                visualDensity: VisualDensity.compact,
+              ),
       ),
     );
   }
