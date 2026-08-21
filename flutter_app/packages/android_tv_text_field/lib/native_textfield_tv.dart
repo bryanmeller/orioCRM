@@ -214,6 +214,7 @@ const String keyDown = 'Arrow Down';
 const String keyLeft = 'Arrow Left';
 const String keyRight = 'Arrow Right';
 const String keyCenter = 'Select';
+const String keyEnter = 'Enter';
 const String goBack = 'Go Back';
 
 /// DPAD NativeTextField with eye toggle
@@ -256,6 +257,7 @@ class AndroidTVTextField extends StatefulWidget {
 class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
   final GlobalKey<_NativeTextFieldState> _nativeTextFieldKey =
       GlobalKey<_NativeTextFieldState>();
+  bool _nativeFieldFocused = false;
 
   @override
   void initState() {
@@ -266,14 +268,26 @@ class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
 
   void _handleFocusChange() {
     if (mounted) {
-      setState(() {
-        if (widget.focusNode.hasFocus) {
-          _nativeTextFieldKey.currentState?.requestFocus();
-        } else {
-          _nativeTextFieldKey.currentState?.clearFocus();
-        }
-      });
+      setState(() {});
+      if (!widget.focusNode.hasFocus && _nativeFieldFocused) {
+        _nativeFieldFocused = false;
+        _nativeTextFieldKey.currentState?.clearFocus();
+      }
     }
+  }
+
+  void _openKeyboard() {
+    _nativeFieldFocused = true;
+    _nativeTextFieldKey.currentState?.requestFocus();
+  }
+
+  bool _isOkKey(KeyEvent event) {
+    final logicalKey = event.logicalKey;
+    return logicalKey == LogicalKeyboardKey.select ||
+        logicalKey == LogicalKeyboardKey.enter ||
+        logicalKey == LogicalKeyboardKey.numpadEnter ||
+        logicalKey.keyLabel == keyCenter ||
+        logicalKey.keyLabel == keyEnter;
   }
 
   @override
@@ -291,13 +305,22 @@ class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
     return KeyboardListener(
       focusNode: widget.focusNode,
       onKeyEvent: (event) {
+        if (event is KeyDownEvent && _isOkKey(event)) {
+          _openKeyboard();
+          return;
+        }
+
         if (event is KeyUpEvent) {
           switch (event.logicalKey.keyLabel) {
             case keyLeft:
-              _nativeTextFieldKey.currentState?.moveCursorLeft();
+              if (_nativeFieldFocused) {
+                _nativeTextFieldKey.currentState?.moveCursorLeft();
+              }
               break;
             case keyRight:
-              _nativeTextFieldKey.currentState?.moveCursorRight();
+              if (_nativeFieldFocused) {
+                _nativeTextFieldKey.currentState?.moveCursorRight();
+              }
               break;
           }
         }
@@ -341,6 +364,9 @@ class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
                 maxLines: widget.maxLines,
                 backgroundColor: widget.backgroundColor,
                 textColor: widget.textColor,
+                onFocusChanged: (hasFocus) {
+                  _nativeFieldFocused = hasFocus;
+                },
                 onSubmitted: widget.onSubmitted,
               ),
             );

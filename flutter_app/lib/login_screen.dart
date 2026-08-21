@@ -5,6 +5,7 @@ import 'api_service.dart';
 import 'server_selection_screen.dart';
 import 'device_info.dart';
 import 'tv_focus.dart';
+import 'tv_safe_area.dart';
 
 class LoginScreen extends StatefulWidget {
   final String deviceId;
@@ -66,6 +67,11 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
+    _codeFocusNode.unfocus();
+    _userFocusNode.unfocus();
+    _passFocusNode.unfocus();
+    FocusScope.of(context).requestFocus(_loginFocusNode);
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -119,14 +125,13 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final screenHeight = MediaQuery.of(context).size.height;
+    final mediaQuery = MediaQuery.of(context);
+    final screenWidth = mediaQuery.size.width;
     final isWideLayout = screenWidth > 900;
-    final contentWidth = screenWidth.clamp(760.0, 1120.0);
-    final contentHeight = (screenHeight - 40).clamp(560.0, 760.0).toDouble();
 
     return Scaffold(
       backgroundColor: Colors.black,
+      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
           Positioned(
@@ -163,46 +168,63 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
           ),
-          SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
-                child: Container(
-                  width: contentWidth,
-                  height: isWideLayout ? contentHeight : null,
-                  constraints: BoxConstraints(
-                    minHeight: isWideLayout ? contentHeight : 0,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0C0C10),
-                    borderRadius: BorderRadius.circular(28),
-                    border: Border.all(color: Colors.white10),
-                  ),
-                  child: isWideLayout
-                      ? Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Expanded(
-                              flex: 5,
-                              child: _buildInfoPanel(context),
+          TvOverscanSafeArea(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final availableWidth = constraints.maxWidth - 16;
+                final availableHeight = constraints.maxHeight - 16;
+                final contentWidth = availableWidth < 700
+                    ? availableWidth
+                    : availableWidth.clamp(700.0, 1080.0).toDouble();
+                final contentHeight = availableHeight < 500
+                    ? availableHeight
+                    : availableHeight.clamp(500.0, 720.0).toDouble();
+
+                return Center(
+                  child: SingleChildScrollView(
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.manual,
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 8,
+                    ),
+                    child: Container(
+                      width: contentWidth,
+                      height: isWideLayout ? contentHeight : null,
+                      constraints: BoxConstraints(
+                        minHeight: isWideLayout ? contentHeight : 0,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0C0C10),
+                        borderRadius: BorderRadius.circular(28),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: isWideLayout
+                          ? Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Expanded(
+                                  flex: 5,
+                                  child: _buildInfoPanel(context),
+                                ),
+                                Expanded(
+                                  flex: 4,
+                                  child: _buildLoginPanel(context),
+                                ),
+                              ],
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _buildInfoPanel(context),
+                                const SizedBox(height: 24),
+                                _buildLoginPanel(context),
+                              ],
                             ),
-                            Expanded(
-                              flex: 4,
-                              child: _buildLoginPanel(context),
-                            ),
-                          ],
-                        )
-                      : Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _buildInfoPanel(context),
-                            const SizedBox(height: 24),
-                            _buildLoginPanel(context),
-                          ],
-                        ),
-                ),
-              ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ],
@@ -212,7 +234,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _buildInfoPanel(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(32),
+      padding: const EdgeInsets.all(24),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           colors: [Color(0xFF08080A), Color(0xFF12101A)],
@@ -220,69 +242,73 @@ class _LoginScreenState extends State<LoginScreen> {
           end: Alignment.bottomCenter,
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'STREAMFLIX TV',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 34,
-              fontWeight: FontWeight.bold,
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 180,
+              height: 60,
+              child: Image.asset(
+                'assets/images/orio_logo.png',
+                fit: BoxFit.contain,
+                alignment: Alignment.centerLeft,
+              ),
             ),
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            'Plataforma Leanback para Android TV e Fire TV',
-            style: TextStyle(
-                color: Colors.purpleAccent,
-                fontSize: 14,
-                fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 24),
-          const Text(
-            'Acesse seu assino com a mesma aparência do simulador web e navegue em telas otimizadas para televisão. Sem controle remoto visível, apenas a interface limpa do conteúdo.',
-            style: TextStyle(color: Colors.white70, fontSize: 15, height: 1.6),
-          ),
-          const SizedBox(height: 28),
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xFF101118),
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: Colors.white10),
+            const SizedBox(height: 8),
+            const Text(
+              'Plataforma Leanback para Android TV e Fire TV',
+              style: TextStyle(
+                  color: Colors.purpleAccent,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Destaques',
-                    style: TextStyle(color: Colors.white70, fontSize: 13)),
-                const SizedBox(height: 12),
-                _buildFeatureItem(
-                    Icons.shield, 'Interface Leanback escura e elegante'),
-                const SizedBox(height: 10),
-                _buildFeatureItem(Icons.tv,
-                    'Tela de login rica em painel e estilo de app TV'),
-                const SizedBox(height: 10),
-                _buildFeatureItem(Icons.language,
-                    'Sem overlay de controle remoto no Flutter'),
-              ],
+            const SizedBox(height: 16),
+            const Text(
+              'Acesse seu assino com a mesma aparência do simulador web e navegue em telas otimizadas para televisão. Sem controle remoto visível, apenas a interface limpa do conteúdo.',
+              style:
+                  TextStyle(color: Colors.white70, fontSize: 14, height: 1.35),
             ),
-          ),
-          const SizedBox(height: 28),
-          Text(
-            'Device ID: ${widget.deviceId}',
-            style: const TextStyle(
-                color: Colors.white54, fontSize: 13, letterSpacing: 1.2),
-          ),
-        ],
+            const SizedBox(height: 18),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF101118),
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Destaques',
+                      style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  const SizedBox(height: 8),
+                  _buildFeatureItem(
+                      Icons.shield, 'Interface Leanback escura e elegante'),
+                  const SizedBox(height: 8),
+                  _buildFeatureItem(Icons.tv,
+                      'Tela de login rica em painel e estilo de app TV'),
+                  const SizedBox(height: 8),
+                  _buildFeatureItem(Icons.language,
+                      'Sem overlay de controle remoto no Flutter'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Device ID: ${widget.deviceId}',
+              style: const TextStyle(
+                  color: Colors.white54, fontSize: 13, letterSpacing: 1.2),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildLoginPanel(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(28),
+      padding: const EdgeInsets.all(24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -300,7 +326,7 @@ class _LoginScreenState extends State<LoginScreen> {
             'Informe seu Codigo, Usuario e Senha para entrar.',
             style: TextStyle(color: Colors.grey, fontSize: 14),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           if (_errorMessage != null) ...[
             Container(
               padding: const EdgeInsets.all(14),
@@ -322,14 +348,14 @@ class _LoginScreenState extends State<LoginScreen> {
             focusNode: _codeFocusNode,
             nextFocusNode: _userFocusNode,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           _buildNativeInputField(
             label: 'Usuario',
             controller: _userController,
             focusNode: _userFocusNode,
             nextFocusNode: _passFocusNode,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           _buildNativeInputField(
             label: 'Senha',
             controller: _passController,
@@ -337,11 +363,10 @@ class _LoginScreenState extends State<LoginScreen> {
             nextFocusNode: _loginFocusNode,
             obscure: true,
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           TvFocusable(
             focusNode: _loginFocusNode,
-            enabled: !_isLoading,
-            onPressed: _handleLogin,
+            onPressed: _isLoading ? null : _handleLogin,
             builder: (context, focused) => AnimatedContainer(
               duration: const Duration(milliseconds: 140),
               padding: const EdgeInsets.symmetric(vertical: 16),
@@ -363,7 +388,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       )
                     : Text(
-                        'ENTRAR NO STREAMFLIX',
+                        'ENTRAR NO ORIO PLAYER',
                         style: TextStyle(
                           color:
                               focused ? const Color(0xFF6A00FF) : Colors.white,
@@ -394,8 +419,13 @@ class _LoginScreenState extends State<LoginScreen> {
         hint: label,
         obscureText: obscure,
         onSubmitted: (_) {
+          if (nextFocusNode == _loginFocusNode) {
+            FocusScope.of(context).requestFocus(_loginFocusNode);
+            _handleLogin();
+            return;
+          }
           if (nextFocusNode != null) {
-            nextFocusNode.requestFocus();
+            FocusScope.of(context).requestFocus(nextFocusNode);
             return;
           }
           _handleLogin();

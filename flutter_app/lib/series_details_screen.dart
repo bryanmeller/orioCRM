@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'api_service.dart';
 import 'tv_focus.dart';
+import 'tv_safe_area.dart';
 
 class SeriesDetailsScreen extends StatefulWidget {
   final IptvContentItem series;
@@ -26,25 +27,84 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
     _detailsFuture = ApiService.fetchSeriesDetails(widget.series);
   }
 
-  void _openEpisode(IptvContentItem episode) {
+  Future<void> _openEpisode(
+    IptvContentItem episode, {
+    String description = '',
+  }) async {
+    final resumePosition = await _askResumePositionIfNeeded(episode);
+    if (!mounted) {
+      return;
+    }
+
     Navigator.of(context).pushNamed(
       '/player',
       arguments: {
         'title': '${widget.series.title} - ${episode.title}',
         'subtitle': episode.subtitle,
+        'description': description.isNotEmpty
+            ? description
+            : episode.description.isNotEmpty
+                ? episode.description
+                : widget.series.description,
+        'imageUrl': widget.series.imageUrl,
         'category': widget.series.category,
         'videoUrl': episode.streamUrl,
         'alternateVideoUrls': episode.alternateStreamUrls,
         'contentType': episode.type,
+        'contentId': ApiService.playbackContentId(episode),
+        'favoriteId': widget.series.id,
+        'resumePositionMs': resumePosition?.inMilliseconds ?? 0,
       },
     );
+  }
+
+  Future<Duration?> _askResumePositionIfNeeded(IptvContentItem episode) async {
+    final position = await ApiService.getSavedPlaybackPosition(
+      ApiService.playbackContentId(episode),
+    );
+    if (position == null || !mounted) {
+      return null;
+    }
+
+    return showDialog<Duration?>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF101216),
+        title: const Text('Continuar assistindo?'),
+        content: Text(
+          'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(context).pop(position),
+            child: const Text('Continuar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(Duration.zero),
+            child: const Text('Ver do inicio'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatResumeTime(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+    }
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: SafeArea(
+      body: TvOverscanSafeArea(
+        backgroundColor: Colors.black,
         child: FutureBuilder<IptvSeriesDetails>(
           future: _detailsFuture,
           builder: (context, snapshot) {
@@ -156,13 +216,21 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
                       ),
                     ),
                     const SizedBox(width: 12),
-                    _buildPlayButton(selectedEpisode),
+                    _buildPlayButton(
+                      selectedEpisode,
+                      description: details.plot,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 16),
                 _buildSeasonRail(seasons),
                 const SizedBox(height: 16),
-                Expanded(child: _buildEpisodes(season.episodes)),
+                Expanded(
+                  child: _buildEpisodes(
+                    season.episodes,
+                    description: details.plot,
+                  ),
+                ),
               ],
             ),
           ),
@@ -211,7 +279,10 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
     );
   }
 
-  Widget _buildEpisodes(List<IptvContentItem> episodes) {
+  Widget _buildEpisodes(
+    List<IptvContentItem> episodes, {
+    String description = '',
+  }) {
     return ListView.separated(
       itemCount: episodes.length,
       separatorBuilder: (_, __) => const SizedBox(height: 10),
@@ -221,7 +292,7 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
             (_selectedEpisode == null && index == 0);
         return TvFocusable(
           autofocus: index == 0,
-          onPressed: () => _openEpisode(episode),
+          onPressed: () => _openEpisode(episode, description: description),
           onFocusChange: (focused) {
             if (focused) {
               setState(() => _selectedEpisode = episode);
@@ -315,9 +386,12 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
     );
   }
 
-  Widget _buildPlayButton(IptvContentItem episode) {
+  Widget _buildPlayButton(
+    IptvContentItem episode, {
+    String description = '',
+  }) {
     return TvFocusable(
-      onPressed: () => _openEpisode(episode),
+      onPressed: () => _openEpisode(episode, description: description),
       builder: (context, focused) => AnimatedContainer(
         duration: const Duration(milliseconds: 120),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),

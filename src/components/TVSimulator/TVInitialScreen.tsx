@@ -13,16 +13,30 @@ const generateDeviceId = () => {
 interface TVInitialScreenProps {
   onGoToLogin: () => void;
   onOpenCustomerPortal?: () => void;
+  deviceId?: string;
+  onDeviceIdReady?: (deviceId: string) => void;
 }
 
-export const TVInitialScreen: React.FC<TVInitialScreenProps> = ({ onGoToLogin, onOpenCustomerPortal }) => {
+export const TVInitialScreen: React.FC<TVInitialScreenProps> = ({
+  onGoToLogin,
+  onOpenCustomerPortal,
+  deviceId: providedDeviceId,
+  onDeviceIdReady
+}) => {
   const [deviceId, setDeviceId] = useState('');
   const [copied, setCopied] = useState(false);
   const [showNoLicenseInfo, setShowNoLicenseInfo] = useState(false);
 
   useEffect(() => {
-    setDeviceId(generateDeviceId());
-  }, []);
+    const nextDeviceId =
+      providedDeviceId ||
+      localStorage.getItem('streamflix_device_id') ||
+      generateDeviceId();
+
+    localStorage.setItem('streamflix_device_id', nextDeviceId);
+    setDeviceId(nextDeviceId);
+    onDeviceIdReady?.(nextDeviceId);
+  }, [onDeviceIdReady, providedDeviceId]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(deviceId);

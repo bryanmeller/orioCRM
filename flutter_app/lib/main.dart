@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'initial_screen.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
@@ -19,9 +18,8 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  final prefs = await SharedPreferences.getInstance();
-  final token = prefs.getString('auth_token');
-  final initialRoute = token != null ? '/home' : '/';
+  final hasSavedSession = await ApiService.hasSavedSession();
+  final initialRoute = hasSavedSession ? '/home' : '/';
 
   runApp(StreamFlixApp(initialRoute: initialRoute));
 }
@@ -59,7 +57,8 @@ class StreamFlixApp extends StatelessWidget {
           case '/login':
             final deviceId = settings.arguments as String? ?? 'unknown';
             return MaterialPageRoute(
-                builder: (_) => LoginScreen(deviceId: deviceId));
+              builder: (_) => _LoginGate(deviceId: deviceId),
+            );
           case '/home':
             return MaterialPageRoute(builder: (_) => const HomeScreen());
           case '/player':
@@ -70,14 +69,32 @@ class StreamFlixApp extends StatelessWidget {
                     .where((item) => item.isNotEmpty)
                     .toList()
                 : <String>[];
+            final liveChannels = (args['liveChannels'] is List)
+                ? (args['liveChannels'] as List)
+                    .whereType<IptvContentItem>()
+                    .toList()
+                : <IptvContentItem>[];
             return MaterialPageRoute(
               builder: (_) => PlayerScreen(
                 title: args['title'] ?? 'Reprodução',
                 subtitle: args['subtitle'] ?? '',
+                description: (args['description'] ?? '').toString(),
+                imageUrl: (args['imageUrl'] ?? '').toString(),
                 category: args['category'] ?? '',
                 videoUrl: args['videoUrl'] ?? '',
                 alternateVideoUrls: alternateVideoUrls,
                 contentType: (args['contentType'] ?? '').toString(),
+                contentId: (args['contentId'] ?? '').toString(),
+                favoriteId: (args['favoriteId'] ?? '').toString(),
+                liveChannels: liveChannels,
+                initialPosition: Duration(
+                  milliseconds: args['resumePositionMs'] is int
+                      ? args['resumePositionMs'] as int
+                      : int.tryParse(
+                            (args['resumePositionMs'] ?? '').toString(),
+                          ) ??
+                          0,
+                ),
               ),
             );
           case '/series':
@@ -91,6 +108,35 @@ class StreamFlixApp extends StatelessWidget {
           default:
             return MaterialPageRoute(builder: (_) => InitialScreen());
         }
+      },
+    );
+  }
+}
+
+class _LoginGate extends StatelessWidget {
+  final String deviceId;
+
+  const _LoginGate({required this.deviceId});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<bool>(
+      future: ApiService.hasSavedSession(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            backgroundColor: Colors.black,
+            body: Center(
+              child: CircularProgressIndicator(color: Color(0xFF6A00FF)),
+            ),
+          );
+        }
+
+        if (snapshot.data == true) {
+          return const HomeScreen();
+        }
+
+        return LoginScreen(deviceId: deviceId);
       },
     );
   }

@@ -32,6 +32,7 @@ class NativeTextfieldTvView(
             if (initialText != null) setText(initialText)
 
             hint = creationParams?.get("hint") as? String ?: ""
+            showSoftInputOnFocus = false
 
             // Initial colors
           // Get color from creationParams safely
@@ -99,6 +100,9 @@ setBackgroundColor(bgColor)
 
         // Focus listener
         editText.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                editText.showSoftInputOnFocus = false
+            }
             val instanceId = creationParams?.get("instanceId") as? Int
             methodChannel.invokeMethod("onFocusChanged", mapOf(
                 "instanceId" to instanceId,
@@ -116,6 +120,7 @@ setBackgroundColor(bgColor)
     fun getText(): String = editText.text.toString()
     fun requestFocus() {
         editText.post {
+            editText.showSoftInputOnFocus = true
             editText.requestFocus()
             editText.setSelection(editText.text.length)
             editText.postDelayed({
@@ -125,7 +130,10 @@ setBackgroundColor(bgColor)
             }, 80)
         }
     }
-    fun clearFocus() { editText.clearFocus() }
+    fun clearFocus() {
+        editText.showSoftInputOnFocus = false
+        editText.clearFocus()
+    }
     fun setEnabled(enabled: Boolean) { editText.isEnabled = enabled }
     fun setHint(hint: String?) { editText.hint = hint }
 

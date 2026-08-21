@@ -38,7 +38,7 @@ const supabaseDbAdmin =
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Basic CORS & OPTIONS handling middleware
   app.use((req, res, next) => {
@@ -1391,6 +1391,232 @@ async function startServer() {
   app.post("/v1/auth/app/login", async (req, res) => {
     try {
       const { licenseCode, username, password, deviceId } = req.body;
+      const inputCode = String(
+        licenseCode || req.body.code || req.body.providerCode || "",
+      ).trim();
+
+      if (!inputCode || !username || !password) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Credenciais incompletas." });
+      }
+
+      let providerProfile: any = null;
+      const { data: providerProfiles } = await supabaseAdmin
+        .from("profiles")
+        .select("*")
+        .in("role", ["PROVIDER", "PROVEDOR"])
+        .is("deleted_at", null);
+
+      if (providerProfiles && providerProfiles.length > 0) {
+        for (const p of providerProfiles) {
+          if (p.internal_notes) {
+            const match = String(p.internal_notes).match(
+              /\[CODIGO_PROVEDOR:\s*(\d+)\]/i,
+            );
+            if (match && match[1] === inputCode) {
+              providerProfile = p;
+              break;
+            }
+          }
+          if (p.provider_code && String(p.provider_code) === inputCode) {
+            providerProfile = p;
+            break;
+          }
+          if (p.server_code && String(p.server_code) === inputCode) {
+            providerProfile = p;
+            break;
+          }
+        }
+      }
+
+      if (!providerProfile) {
+        try {
+          const { data: authUsers } = await supabaseAdmin.auth.admin.listUsers();
+          if (authUsers && authUsers.users) {
+            for (const u of authUsers.users) {
+              const meta = u.user_metadata || {};
+              if (meta.role === "PROVIDER" || meta.role === "PROVEDOR") {
+                const pCode = meta.provider_code || meta.server_code;
+                if (pCode && String(pCode) === inputCode) {
+                  const { data: prof } = await supabaseAdmin
+                    .from("profiles")
+                    .select("*")
+                    .eq("id", u.id)
+                    .maybeSingle();
+                  providerProfile =
+                    prof || {
+                      id: u.id,
+                      full_name: meta.full_name || "Provedor",
+                      role: "PROVIDER",
+                      status: meta.status || "ACTIVE",
+                    };
+                  break;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Erro ao buscar authUsers para provedor:", e);
+        }
+      }
+
+      if (providerProfile) {
+        if (
+          providerProfile.status === "BLOCKED" ||
+          providerProfile.status === "SUSPENDED" ||
+          providerProfile.status === "CANCELLED" ||
+          providerProfile.status === "INACTIVE"
+        ) {
+          return res
+            .status(401)
+            .json({ success: false, error: "Provedor bloqueado ou inativo." });
+        }
+
+        const { data: providerServers } = await supabaseAdmin
+          .from("iptv_servers")
+          .select("*")
+          .eq("owner_id", providerProfile.id)
+          .is("deleted_at", null);
+
+        if (!providerServers || providerServers.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: "Nenhum servidor DNS encontrado para este provedor.",
+          });
+        }
+
+        const activeDns =
+          providerServers.find((s: any) => s.status === "ACTIVE") ||
+          providerServers[0];
+
+        let rawUrl = (activeDns.url || "").trim();
+        if (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) {
+          rawUrl = "http://" + rawUrl;
+        }
+
+        let baseUrl = rawUrl;
+        try {
+          const urlObj = new URL(rawUrl);
+          baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+        } catch (e) {
+          baseUrl = rawUrl.replace(/\/+$/, "");
+        }
+
+        let isValidXtream = false;
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 9000);
+          const m3uUrl = `${baseUrl}/get.php?username=${encodeURIComponent(
+            username,
+          )}&password=${encodeURIComponent(
+            password,
+          )}&type=m3u_plus&output=hls`;
+          const xtreamRes = await fetch(m3uUrl, {
+            method: "GET",
+            headers: {
+              "User-Agent": "IPTVSmartersPro/1.0 (Linux; Android 10)",
+              Accept: "*/*",
+            },
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (xtreamRes.ok) {
+            const bodyText = await xtreamRes.text();
+            const isM3u =
+              bodyText.includes("#EXTM3U") ||
+              bodyText.includes("#EXTINF") ||
+              bodyText.includes(".ts") ||
+              bodyText.includes(".m3u8");
+            const lower = bodyText.toLowerCase();
+            const isErr =
+              lower.includes("invalid") ||
+              lower.includes("banned") ||
+              lower.includes("disabled") ||
+              lower.includes("auth_failed") ||
+              lower.includes("denied");
+            isValidXtream = isM3u && !isErr;
+          }
+        } catch (e) {
+          console.error("Erro na validacao do get.php:", e);
+        }
+
+        if (!isValidXtream) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 9000);
+            const playerApiUrl = `${baseUrl}/player_api.php?username=${encodeURIComponent(
+              username,
+            )}&password=${encodeURIComponent(password)}`;
+            const apiRes = await fetch(playerApiUrl, {
+              method: "GET",
+              headers: {
+                "User-Agent": "IPTVSmartersPro/1.0 (Linux; Android 10)",
+                Accept: "application/json, text/plain, */*",
+              },
+              signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            if (apiRes.ok) {
+              const apiData = await apiRes.json();
+              if (apiData && apiData.user_info) {
+                const auth = apiData.user_info.auth;
+                const status = (apiData.user_info.status || "").toLowerCase();
+                if (
+                  (auth === 1 || auth === "1") &&
+                  status !== "banned" &&
+                  status !== "disabled"
+                ) {
+                  isValidXtream = true;
+                }
+              }
+            }
+          } catch (e) {
+            // Fallback only.
+          }
+        }
+
+        if (!isValidXtream) {
+          return res
+            .status(401)
+            .json({ success: false, error: "Usuario ou senha IPTV invalidos." });
+        }
+
+        const token = jwt.sign(
+          {
+            id: providerProfile.id,
+            role: "PROVIDER_USER",
+            username,
+            providerCode: inputCode,
+          },
+          JWT_SECRET,
+          { expiresIn: "7d" },
+        );
+
+        return res.json({
+          success: true,
+          token,
+          user: {
+            id: providerProfile.id,
+            username,
+            name: providerProfile.full_name || username,
+            provider_code: inputCode,
+            role: "PROVIDER",
+          },
+          servers: [
+            {
+              id: activeDns.id,
+              display_name: activeDns.name || "Servidor Provedor",
+              url: baseUrl,
+              connection_type: activeDns.connection_type || "XTREAM_MANUAL",
+              username,
+              password,
+            },
+          ],
+        });
+      }
 
       let userId: string | null = null;
       if (username && password) {
@@ -1409,7 +1635,7 @@ async function startServer() {
       let query = supabaseAdmin
         .from("licenses")
         .select("*, plan:license_plans(*)")
-        .eq("code", licenseCode);
+        .eq("code", inputCode);
       if (userId) {
         query = query.eq("end_user_id", userId);
       }
@@ -1509,6 +1735,9 @@ async function startServer() {
         servers = cServers || [];
       }
 
+      const clientXtreamUser = (license.xtream_username || "").trim();
+      const clientXtreamPass = (license.xtream_password || "").trim();
+
       const safeServers = (servers || []).map((s: any, index: number) => {
         let rawUrl = (s.url || "").trim();
         let rawUser = (s.username || "").trim();
@@ -1548,19 +1777,22 @@ async function startServer() {
           } catch (e) {}
         }
 
+        const effectiveUser = clientXtreamUser || rawUser;
+        const effectivePass = clientXtreamPass || rawPass;
+
         return {
           id: s.id,
           display_name: s.name || `Servidor ${index + 1}`,
           url: rawUrl,
           connection_type: s.connection_type || "XTREAM_MANUAL",
-          username: rawUser,
-          password: rawPass,
+          username: effectiveUser,
+          password: effectivePass,
           ...(extractedOutput ? { preferred_output: extractedOutput } : {}),
         };
       });
 
       const token = jwt.sign(
-        { id: license.end_user_id || license.id, code: licenseCode },
+        { id: license.end_user_id || license.id, code: inputCode },
         JWT_SECRET,
         { expiresIn: "7d" },
       );

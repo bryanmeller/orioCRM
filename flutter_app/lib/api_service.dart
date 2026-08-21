@@ -68,6 +68,7 @@ class IptvContentItem {
   final String? nextShowing;
   final String? rating;
   final String? year;
+  final String description;
 
   const IptvContentItem({
     required this.id,
@@ -82,6 +83,7 @@ class IptvContentItem {
     this.nextShowing,
     this.rating,
     this.year,
+    this.description = '',
   });
 }
 
@@ -90,6 +92,25 @@ class IptvCatalog {
   final List<IptvContentItem> items;
 
   const IptvCatalog({required this.categories, required this.items});
+}
+
+class ContinueWatchingItem {
+  final IptvContentItem item;
+  final Duration position;
+  final Duration duration;
+
+  const ContinueWatchingItem({
+    required this.item,
+    required this.position,
+    required this.duration,
+  });
+
+  double get progress {
+    if (duration <= Duration.zero) {
+      return 0;
+    }
+    return (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
+  }
 }
 
 class IptvSeriesSeason {
@@ -117,10 +138,16 @@ class IptvSeriesDetails {
 }
 
 class ApiService {
+  static const Duration _requestTimeout = Duration(seconds: 15);
+
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://lightseagreen-rail-619623.hostingersite.com/api',
+    defaultValue: 'https://dimgrey-sardine-991820.hostingersite.com/api',
   );
+
+  static String get appBaseUrl {
+    return baseUrl.replaceFirst(RegExp(r'/api/?$'), '');
+  }
 
   static Future<Map<String, dynamic>> loginApp({
     required String licenseCode,
@@ -129,17 +156,19 @@ class ApiService {
     required String deviceId,
     required Map<String, dynamic> deviceInfo,
   }) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/lynx/login'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'licenseCode': licenseCode,
-        'username': username,
-        'password': password,
-        'deviceId': deviceId,
-        'deviceInfo': deviceInfo,
-      }),
-    );
+    final response = await http
+        .post(
+          Uri.parse('$appBaseUrl/v1/auth/app/login'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'licenseCode': licenseCode,
+            'username': username,
+            'password': password,
+            'deviceId': deviceId,
+            'deviceInfo': deviceInfo,
+          }),
+        )
+        .timeout(_requestTimeout);
 
     final decoded = _decodeObject(response.body);
     if (response.statusCode == 200) {
@@ -157,6 +186,17 @@ class ApiService {
         await prefs.setString('servers_data', jsonEncode(decoded['servers']));
       }
 
+      final token = _stringValue(
+        decoded['token'] ??
+            decoded['authToken'] ??
+            decoded['access_token'] ??
+            decoded['sessionToken'],
+      );
+      await prefs.setString(
+        'auth_token',
+        token.isNotEmpty ? token : 'authenticated',
+      );
+
       return decoded;
     }
 
@@ -167,14 +207,16 @@ class ApiService {
     String deviceId,
     Map<String, dynamic> deviceInfo,
   ) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/v1/auth/app/trial'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'deviceId': deviceId,
-        'deviceInfo': deviceInfo,
-      }),
-    );
+    final response = await http
+        .post(
+          Uri.parse('$appBaseUrl/v1/auth/app/trial'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'deviceId': deviceId,
+            'deviceInfo': deviceInfo,
+          }),
+        )
+        .timeout(_requestTimeout);
     if (response.statusCode == 200) {
       return _decodeObject(response.body);
     }
@@ -224,6 +266,38 @@ class ApiService {
     }
 
     return servers.first;
+  }
+
+  static Future<List<IptvServer>> getSavedServers() async {
+    final prefs = await SharedPreferences.getInstance();
+    final rawServers = prefs.getString('servers_data');
+    if (rawServers == null || rawServers.isEmpty) {
+      return [];
+    }
+
+    final decoded = jsonDecode(rawServers);
+    if (decoded is! List || decoded.isEmpty) {
+      return [];
+    }
+
+    return decoded
+        .asMap()
+        .entries
+        .where((entry) => entry.value is Map)
+        .map(
+          (entry) => IptvServer.fromJson(
+            Map<String, dynamic>.from(entry.value as Map),
+            entry.key,
+          ),
+        )
+        .toList();
+  }
+
+  static Future<void> selectActiveServer(IptvServer server) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('selected_server_id', server.id);
+    await prefs.setString('selected_server_url', server.baseUrl);
+    await prefs.setString('selected_server_name', server.name);
   }
 
   static Future<IptvCatalog> fetchLiveCatalog() async {
@@ -276,6 +350,9 @@ class ApiService {
             generatedUrls.where((url) => url != streamUrl).toList(),
         imageUrl: _stringValue(item['stream_icon']),
         type: 'live',
+        description: _stringValue(
+          item['description'] ?? item['plot'] ?? item['overview'],
+        ),
         nextShowing: _formatProgramNext(item),
       );
     }).toList();
@@ -326,6 +403,12 @@ class ApiService {
         type: 'movie',
         rating: _rating(item),
         year: year.isNotEmpty ? year : null,
+        description: _stringValue(
+          item['plot'] ??
+              item['description'] ??
+              item['overview'] ??
+              item['plot_long'],
+        ),
       );
     }).toList();
 
@@ -368,6 +451,9 @@ class ApiService {
         type: 'series',
         rating: _rating(item),
         year: year.isNotEmpty ? year : null,
+        description: _stringValue(
+          item['plot'] ?? item['description'] ?? item['overview'],
+        ),
       );
     }).toList();
 
@@ -400,7 +486,7 @@ class ApiService {
         'Accept': 'application/json, text/plain, */*',
         'User-Agent': 'IPTVSmartersPro/1.0 (Linux; Android 10)',
       },
-    );
+    ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
@@ -507,6 +593,7 @@ class ApiService {
       type: 'episode',
       rating: series.rating,
       year: series.year,
+      description: series.description,
     );
   }
 
@@ -519,11 +606,234 @@ class ApiService {
     await prefs.remove('selected_server_id');
     await prefs.remove('selected_server_url');
     await prefs.remove('selected_server_name');
+    await prefs.remove(_continueWatchingKey);
   }
 
   static Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('auth_token');
+  }
+
+  static Future<bool> hasSavedSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token') ?? '';
+    final servers = prefs.getString('servers_data') ?? '';
+    return token.isNotEmpty || servers.isNotEmpty;
+  }
+
+  static String playbackContentId(IptvContentItem item) {
+    return '${item.type}:${item.id}';
+  }
+
+  static String _playbackPositionKey(String contentId) {
+    return 'playback_position_ms_$contentId';
+  }
+
+  static String _playbackDurationKey(String contentId) {
+    return 'playback_duration_ms_$contentId';
+  }
+
+  static const String _continueWatchingKey = 'continue_watching_items';
+
+  static String _contentItemIdFromPlaybackId(String contentId) {
+    final separator = contentId.indexOf(':');
+    if (separator < 0 || separator == contentId.length - 1) {
+      return contentId;
+    }
+    return contentId.substring(separator + 1);
+  }
+
+  static Future<List<Map<String, dynamic>>> _readContinueWatchingRaw(
+    SharedPreferences prefs,
+  ) async {
+    final rawList = prefs.getStringList(_continueWatchingKey) ?? [];
+    return rawList
+        .map((raw) {
+          try {
+            final decoded = jsonDecode(raw);
+            if (decoded is Map) {
+              return Map<String, dynamic>.from(decoded);
+            }
+          } catch (_) {
+            return null;
+          }
+          return null;
+        })
+        .whereType<Map<String, dynamic>>()
+        .toList();
+  }
+
+  static Future<List<ContinueWatchingItem>> getContinueWatchingItems() async {
+    final prefs = await SharedPreferences.getInstance();
+    final rawItems = await _readContinueWatchingRaw(prefs);
+
+    final items = <ContinueWatchingItem>[];
+    for (final raw in rawItems) {
+      final contentId = _stringValue(raw['contentId']);
+      final positionMs = prefs.getInt(_playbackPositionKey(contentId)) ??
+          int.tryParse('${raw['positionMs'] ?? 0}') ??
+          0;
+      final durationMs = prefs.getInt(_playbackDurationKey(contentId)) ??
+          int.tryParse('${raw['durationMs'] ?? 0}') ??
+          0;
+
+      if (contentId.isEmpty ||
+          positionMs < const Duration(seconds: 30).inMilliseconds ||
+          (durationMs > 0 && positionMs / durationMs >= 0.95)) {
+        continue;
+      }
+
+      final streamUrl = _stringValue(raw['streamUrl']);
+      if (streamUrl.isEmpty) {
+        continue;
+      }
+
+      items.add(
+        ContinueWatchingItem(
+          item: IptvContentItem(
+            id: _contentItemIdFromPlaybackId(contentId),
+            title: _stringValue(raw['title'], fallback: 'Continuar assistindo'),
+            subtitle: _stringValue(raw['subtitle']),
+            category: _stringValue(raw['category']),
+            categoryId: _stringValue(raw['categoryId']),
+            streamUrl: streamUrl,
+            alternateStreamUrls: (raw['alternateStreamUrls'] is List)
+                ? (raw['alternateStreamUrls'] as List)
+                    .map((item) => item.toString())
+                    .where((item) => item.isNotEmpty)
+                    .toList()
+                : const [],
+            imageUrl: _stringValue(raw['imageUrl']),
+            type: _stringValue(raw['type'], fallback: 'movie'),
+            description: _stringValue(raw['description']),
+          ),
+          position: Duration(milliseconds: positionMs),
+          duration: Duration(milliseconds: durationMs),
+        ),
+      );
+    }
+
+    return items;
+  }
+
+  static Future<Duration?> getSavedPlaybackPosition(String contentId) async {
+    if (contentId.isEmpty) {
+      return null;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final positionMs = prefs.getInt(_playbackPositionKey(contentId)) ?? 0;
+    if (positionMs < const Duration(seconds: 30).inMilliseconds) {
+      return null;
+    }
+
+    return Duration(milliseconds: positionMs);
+  }
+
+  static Future<void> savePlaybackProgress({
+    required String contentId,
+    required Duration position,
+    required Duration duration,
+    String title = '',
+    String subtitle = '',
+    String category = '',
+    String categoryId = '',
+    String streamUrl = '',
+    List<String> alternateStreamUrls = const [],
+    String imageUrl = '',
+    String type = '',
+    String description = '',
+  }) async {
+    if (contentId.isEmpty) {
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final positionMs = position.inMilliseconds;
+    final durationMs = duration.inMilliseconds;
+
+    final isTooEarly = position < const Duration(seconds: 30);
+    final isNearEnd = duration > Duration.zero &&
+        (duration - position) < const Duration(minutes: 2);
+    final watchedAlmostAll = durationMs > 0 && positionMs / durationMs >= 0.95;
+
+    if (isTooEarly || isNearEnd || watchedAlmostAll) {
+      await clearPlaybackProgress(contentId);
+      return;
+    }
+
+    await prefs.setInt(_playbackPositionKey(contentId), positionMs);
+    await prefs.setInt(_playbackDurationKey(contentId), durationMs);
+
+    if (streamUrl.isNotEmpty && title.isNotEmpty) {
+      final items = await _readContinueWatchingRaw(prefs);
+      items.removeWhere((item) => _stringValue(item['contentId']) == contentId);
+      items.insert(0, {
+        'contentId': contentId,
+        'title': title,
+        'subtitle': subtitle,
+        'category': category,
+        'categoryId': categoryId,
+        'streamUrl': streamUrl,
+        'alternateStreamUrls': alternateStreamUrls,
+        'imageUrl': imageUrl,
+        'type': type,
+        'description': description,
+        'positionMs': positionMs,
+        'durationMs': durationMs,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      });
+      await prefs.setStringList(
+        _continueWatchingKey,
+        items.take(30).map(jsonEncode).toList(),
+      );
+    }
+  }
+
+  static Future<void> clearPlaybackProgress(String contentId) async {
+    if (contentId.isEmpty) {
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_playbackPositionKey(contentId));
+    await prefs.remove(_playbackDurationKey(contentId));
+    final items = await _readContinueWatchingRaw(prefs);
+    items.removeWhere((item) => _stringValue(item['contentId']) == contentId);
+    await prefs.setStringList(
+      _continueWatchingKey,
+      items.map(jsonEncode).toList(),
+    );
+  }
+
+  static Future<bool> isFavorite(String favoriteId) async {
+    if (favoriteId.isEmpty) {
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final favorites = prefs.getStringList('favorites') ?? [];
+    return favorites.contains(favoriteId);
+  }
+
+  static Future<bool> toggleFavorite(String favoriteId) async {
+    if (favoriteId.isEmpty) {
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final favorites = prefs.getStringList('favorites') ?? [];
+    final nextFavorites = favorites.toSet();
+    final isFavorite = nextFavorites.contains(favoriteId);
+
+    if (isFavorite) {
+      nextFavorites.remove(favoriteId);
+    } else {
+      nextFavorites.add(favoriteId);
+    }
+
+    await prefs.setStringList('favorites', nextFavorites.toList());
+    return !isFavorite;
   }
 
   static Future<IptvServer> _requireActiveServer() async {
@@ -543,16 +853,18 @@ class ApiService {
     IptvServer server,
     String action,
   ) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/lynx/xtream/live'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'baseUrl': server.cleanBaseUrl,
-        'username': server.username,
-        'password': server.password,
-        'action': action,
-      }),
-    );
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/lynx/xtream/live'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'baseUrl': server.cleanBaseUrl,
+            'username': server.username,
+            'password': server.password,
+            'action': action,
+          }),
+        )
+        .timeout(_requestTimeout);
 
     final decoded = _decodeObject(response.body);
     if (response.statusCode < 200 ||
@@ -584,7 +896,7 @@ class ApiService {
         'Accept': 'application/json, text/plain, */*',
         'User-Agent': 'IPTVSmartersPro/1.0 (Linux; Android 10)',
       },
-    );
+    ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');

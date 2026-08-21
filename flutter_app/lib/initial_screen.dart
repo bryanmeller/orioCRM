@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'device_info.dart';
 import 'api_service.dart';
 import 'tv_focus.dart';
+import 'tv_safe_area.dart';
 
 class InitialScreen extends StatefulWidget {
   @override
@@ -26,7 +27,17 @@ class _InitialScreenState extends State<InitialScreen> {
     super.dispose();
   }
 
-  void _goToLogin() {
+  Future<void> _goToLogin() async {
+    final hasSavedSession = await ApiService.hasSavedSession();
+    if (!mounted) {
+      return;
+    }
+
+    if (hasSavedSession) {
+      Navigator.of(context).pushReplacementNamed('/home');
+      return;
+    }
+
     Navigator.of(context).pushNamed('/login', arguments: _deviceId);
   }
 
@@ -65,7 +76,6 @@ class _InitialScreenState extends State<InitialScreen> {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final contentWidth = screenWidth.clamp(760.0, 1160.0);
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -105,236 +115,249 @@ class _InitialScreenState extends State<InitialScreen> {
               ),
             ),
           ),
-          SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 32, horizontal: 16),
-                child: Container(
-                  width: contentWidth,
-                  padding: const EdgeInsets.all(28),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0B0B0F),
-                    borderRadius: BorderRadius.circular(28),
-                    border: Border.all(color: Colors.white10),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.45),
-                        blurRadius: 40,
-                        offset: const Offset(0, 20),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: const [
-                                Text(
-                                  'STREAMFLIX TV',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                SizedBox(height: 12),
-                                Text(
-                                  'Aplicativo Android TV & Fire TV',
-                                  style: TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                SizedBox(height: 20),
-                                Text(
-                                  'Use o aplicativo com a mesma aparência do simulador web, sem o painel de controle remoto. Faça login rapidamente e navegue pela TV com foco simplificado.',
-                                  style: TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 15,
-                                    height: 1.5,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 24),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 18, vertical: 12),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF141414),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                  color:
-                                      const Color(0xFF6A00FF).withOpacity(0.3)),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Device ID',
-                                  style: TextStyle(
-                                      color: Colors.white70, fontSize: 12),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  _deviceId,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 18,
-                                    letterSpacing: 1.5,
-                                  ),
-                                ),
-                              ],
-                            ),
+          TvOverscanSafeArea(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final availableWidth = constraints.maxWidth - 16;
+                final contentWidth = availableWidth < 680
+                    ? availableWidth
+                    : availableWidth.clamp(680.0, 1080.0).toDouble();
+                return Center(
+                  child: SingleChildScrollView(
+                    padding:
+                        const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                    child: Container(
+                      width: contentWidth,
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0B0B0F),
+                        borderRadius: BorderRadius.circular(28),
+                        border: Border.all(color: Colors.white10),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.45),
+                            blurRadius: 40,
+                            offset: const Offset(0, 20),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 32),
-                      if (_showNoLicenseInfo) ...[
-                        Container(
-                          padding: const EdgeInsets.all(24),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF111318),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: Colors.white10),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'Sem Licença Ativa',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 24,
-                                    fontWeight: FontWeight.bold),
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 18),
-                              if (_isLoadingTrial)
-                                const Center(child: CircularProgressIndicator())
-                              else
-                                Text(
-                                  _trialError,
-                                  style: const TextStyle(
-                                      color: Colors.tealAccent, fontSize: 15),
-                                  textAlign: TextAlign.center,
-                                ),
-                              const SizedBox(height: 28),
-                              Container(
-                                padding: const EdgeInsets.all(20),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF0C0D12),
-                                  borderRadius: BorderRadius.circular(18),
-                                ),
+                              Expanded(
                                 child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Text(
-                                      'Identificador do dispositivo',
-                                      style: TextStyle(
-                                          color: Colors.white70, fontSize: 13),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Text(
-                                      _deviceId,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 22,
-                                        letterSpacing: 1.8,
-                                        fontWeight: FontWeight.bold,
+                                    SizedBox(
+                                      width: screenWidth > 900 ? 180 : 150,
+                                      height: screenWidth > 900 ? 58 : 48,
+                                      child: Image.asset(
+                                        'assets/images/orio_logo.png',
+                                        fit: BoxFit.contain,
+                                        alignment: Alignment.centerLeft,
                                       ),
-                                      textAlign: TextAlign.center,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    const Text(
+                                      'Aplicativo Android TV & Fire TV',
+                                      style: TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    const Text(
+                                      'Use o aplicativo com a mesma aparência do simulador web, sem o painel de controle remoto. Faça login rapidamente e navegue pela TV com foco simplificado.',
+                                      style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 14,
+                                        height: 1.35,
+                                      ),
                                     ),
                                   ],
                                 ),
                               ),
-                              const SizedBox(height: 28),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: OutlinedButton(
-                                      onPressed: () => setState(
-                                          () => _showNoLicenseInfo = false),
-                                      style: OutlinedButton.styleFrom(
-                                        side: const BorderSide(
-                                            color: Colors.white10),
-                                        padding: const EdgeInsets.symmetric(
-                                            vertical: 16),
-                                      ),
-                                      child: const Text('Voltar',
-                                          style:
-                                              TextStyle(color: Colors.white)),
+                              const SizedBox(width: 18),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 18, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF141414),
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(
+                                      color: const Color(0xFF6A00FF)
+                                          .withOpacity(0.3)),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      'Device ID',
+                                      style: TextStyle(
+                                          color: Colors.white70, fontSize: 12),
                                     ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: ElevatedButton(
-                                      onPressed: () {
-                                        Clipboard.setData(
-                                            ClipboardData(text: _deviceId));
-                                        ScaffoldMessenger.of(context)
-                                            .showSnackBar(
-                                          const SnackBar(
-                                              content:
-                                                  Text('Device ID Copiado!')),
-                                        );
-                                      },
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor:
-                                            const Color(0xFF6A00FF),
-                                        padding: const EdgeInsets.symmetric(
-                                            vertical: 16),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      _deviceId,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                        letterSpacing: 1.5,
                                       ),
-                                      child: const Text('Copiar Identificador'),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ],
                           ),
-                        )
-                      ] else ...[
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: _buildOptionCard(
-                                title: 'JÁ TENHO LICENÇA',
-                                subtitle: 'Acessar o Aplicativo',
-                                description:
-                                    'Informe seu Código, Usuário e Senha para autenticar.',
-                                buttonText: 'ENTRAR',
-                                color: const Color(0xFF6A00FF),
-                                onTap: _goToLogin,
-                                autofocus: true,
+                          const SizedBox(height: 20),
+                          if (_showNoLicenseInfo) ...[
+                            Container(
+                              padding: const EdgeInsets.all(24),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF111318),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: Colors.white10),
                               ),
-                            ),
-                            const SizedBox(width: 24),
-                            Expanded(
-                              child: _buildOptionCard(
-                                title: 'NÃO TENHO LICENÇA',
-                                subtitle: 'Adquira sua Licença',
-                                description:
-                                    'Acesse o teste grátis ou compre uma licença.',
-                                buttonText: 'VER DETALHES',
-                                color: Colors.teal,
-                                onTap: _handleNoLicense,
-                                autofocus: false,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  const Text(
+                                    'Sem Licença Ativa',
+                                    style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.bold),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                  const SizedBox(height: 18),
+                                  if (_isLoadingTrial)
+                                    const Center(
+                                        child: CircularProgressIndicator())
+                                  else
+                                    Text(
+                                      _trialError,
+                                      style: const TextStyle(
+                                          color: Colors.tealAccent,
+                                          fontSize: 15),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  const SizedBox(height: 28),
+                                  Container(
+                                    padding: const EdgeInsets.all(20),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF0C0D12),
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        const Text(
+                                          'Identificador do dispositivo',
+                                          style: TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 13),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        Text(
+                                          _deviceId,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 22,
+                                            letterSpacing: 1.8,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 28),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: OutlinedButton(
+                                          onPressed: () => setState(
+                                              () => _showNoLicenseInfo = false),
+                                          style: OutlinedButton.styleFrom(
+                                            side: const BorderSide(
+                                                color: Colors.white10),
+                                            padding: const EdgeInsets.symmetric(
+                                                vertical: 16),
+                                          ),
+                                          child: const Text('Voltar',
+                                              style: TextStyle(
+                                                  color: Colors.white)),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: ElevatedButton(
+                                          onPressed: () {
+                                            Clipboard.setData(
+                                                ClipboardData(text: _deviceId));
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              const SnackBar(
+                                                  content: Text(
+                                                      'Device ID Copiado!')),
+                                            );
+                                          },
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor:
+                                                const Color(0xFF6A00FF),
+                                            padding: const EdgeInsets.symmetric(
+                                                vertical: 16),
+                                          ),
+                                          child: const Text(
+                                              'Copiar Identificador'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
                               ),
+                            )
+                          ] else ...[
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: _buildOptionCard(
+                                    title: 'JÁ TENHO LICENÇA',
+                                    subtitle: 'Acessar o Aplicativo',
+                                    description:
+                                        'Informe seu Código, Usuário e Senha para autenticar.',
+                                    buttonText: 'ENTRAR',
+                                    color: const Color(0xFF6A00FF),
+                                    onTap: _goToLogin,
+                                    autofocus: true,
+                                  ),
+                                ),
+                                const SizedBox(width: 18),
+                                Expanded(
+                                  child: _buildOptionCard(
+                                    title: 'NÃO TENHO LICENÇA',
+                                    subtitle: 'Adquira sua Licença',
+                                    description:
+                                        'Acesse o teste grátis ou compre uma licença.',
+                                    buttonText: 'VER DETALHES',
+                                    color: Colors.teal,
+                                    onTap: _handleNoLicense,
+                                    autofocus: false,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
-                        ),
-                      ],
-                    ],
+                        ],
+                      ),
+                    ),
                   ),
-                ),
-              ),
+                );
+              },
             ),
           ),
         ],
@@ -356,7 +379,7 @@ class _InitialScreenState extends State<InitialScreen> {
       onPressed: onTap,
       builder: (context, focused) => AnimatedContainer(
         duration: const Duration(milliseconds: 140),
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(18),
         decoration: tvFocusDecoration(
           focused: focused,
           baseColor: const Color(0xFF111318),
@@ -379,26 +402,26 @@ class _InitialScreenState extends State<InitialScreen> {
                     color: color, fontSize: 12, fontWeight: FontWeight.bold),
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
             Text(
               subtitle,
               style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 22,
+                  fontSize: 20,
                   fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             Text(
               description,
               style: const TextStyle(
-                  color: Colors.grey, fontSize: 15, height: 1.5),
+                  color: Colors.grey, fontSize: 14, height: 1.35),
             ),
-            const SizedBox(height: 26),
+            const SizedBox(height: 18),
             SizedBox(
               width: double.infinity,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 140),
-                padding: const EdgeInsets.symmetric(vertical: 18),
+                padding: const EdgeInsets.symmetric(vertical: 14),
                 decoration: BoxDecoration(
                   color: focused ? Colors.white : color,
                   borderRadius: BorderRadius.circular(18),

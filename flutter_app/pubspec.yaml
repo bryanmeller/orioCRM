@@ -11,17 +11,31 @@ dependencies:
   http: ^1.1.0
   shared_preferences: ^2.5.3
   device_info_plus: ^13.2.0
-  android_tv_text_field:
-    path: packages/android_tv_text_field
   video_player: ^2.13.0
+  wakelock_plus: ^1.7.0
   media_kit: ^1.2.6
   media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.7
+  android_tv_text_field:
+    path: packages/android_tv_text_field
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^2.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: assets/images/orio_app_icon.png
+  min_sdk_android: 21
+  adaptive_icon_background: "#08080A"
+  adaptive_icon_foreground: assets/images/orio_app_icon.png
+  adaptive_icon_foreground_inset: 24
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/orio_logo.png
+    - assets/images/orio_app_icon.png

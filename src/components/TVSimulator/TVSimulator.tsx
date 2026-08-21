@@ -21,6 +21,7 @@ export const TVSimulator: React.FC<TVSimulatorProps> = ({
   const [homeRowIndex, setHomeRowIndex] = useState<number>(2); // 0=sidebar, 1=hero, 2=grid
   const [homeColIndex, setHomeColIndex] = useState<number>(0);
   const [showRemote, setShowRemote] = useState<boolean>(true);
+  const [deviceId, setDeviceId] = useState<string>(() => localStorage.getItem('streamflix_device_id') || '');
 
   // Restart simulation
   const handleRestart = () => {
@@ -210,6 +211,8 @@ export const TVSimulator: React.FC<TVSimulatorProps> = ({
 
           {screenMode === 'initial' && (
             <TVInitialScreen
+              deviceId={deviceId}
+              onDeviceIdReady={setDeviceId}
               onGoToLogin={() => setScreenMode('login')}
               onOpenCustomerPortal={onOpenCustomerPortal}
             />
@@ -217,6 +220,7 @@ export const TVSimulator: React.FC<TVSimulatorProps> = ({
 
           {screenMode === 'login' && (
             <TVLoginScreen
+              deviceId={deviceId}
               focusedIndex={loginFocusIndex}
               onLoginSuccess={() => setScreenMode('home')}
               onSelectFocused={(idx) => setLoginFocusIndex(idx)}

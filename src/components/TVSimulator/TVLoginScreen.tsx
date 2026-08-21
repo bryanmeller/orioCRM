@@ -6,9 +6,10 @@ interface TVLoginScreenProps {
   focusedIndex?: number;
   onSelectFocused?: (idx: number) => void;
   onBackToInitial?: () => void;
+  deviceId?: string;
 }
 
-export const TVLoginScreen: React.FC<TVLoginScreenProps> = ({ onLoginSuccess }) => {
+export const TVLoginScreen: React.FC<TVLoginScreenProps> = ({ onLoginSuccess, deviceId }) => {
   const [licenseCode, setLicenseCode] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -22,23 +23,50 @@ export const TVLoginScreen: React.FC<TVLoginScreenProps> = ({ onLoginSuccess }) 
     setLoading(true);
 
     try {
-      const res = await fetch('/api/lynx/login', {
+      const activeDeviceId =
+        deviceId ||
+        localStorage.getItem('streamflix_device_id') ||
+        `WEB-TV-${Date.now()}`;
+
+      localStorage.setItem('streamflix_device_id', activeDeviceId);
+
+      const res = await fetch('/v1/auth/app/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ licenseCode, username, password })
+        body: JSON.stringify({
+          licenseCode,
+          username,
+          password,
+          deviceId: activeDeviceId,
+          deviceInfo: {
+            platform: 'Web TV Simulator',
+            userAgent: navigator.userAgent,
+            language: navigator.language,
+            screen: `${window.screen.width}x${window.screen.height}`
+          }
+        })
       });
       const data = await res.json();
       
       setLoading(false);
       if (data.success) {
-        if (data.servers.length === 0) {
+        const servers = data.servers || [];
+        if (servers.length === 0) {
            setErrorMsg(data.message || 'Nenhum servidor disponível.');
            return;
         }
         localStorage.setItem('streamflix_user', username);
+        localStorage.setItem('streamflix_username', username);
         localStorage.setItem('streamflix_license_code', licenseCode);
         localStorage.setItem('streamflix_authenticated', 'true');
-        localStorage.setItem('streamflix_servers', JSON.stringify(data.servers));
+        localStorage.setItem('streamflix_servers', JSON.stringify(servers));
+        if (data.token) localStorage.setItem('streamflix_token', data.token);
+        if (data.user) localStorage.setItem('streamflix_user_data', JSON.stringify(data.user));
+        if (data.license) localStorage.setItem('streamflix_license_data', JSON.stringify(data.license));
+        if (servers[0]) {
+          localStorage.setItem('streamflix_server_url', servers[0].url || servers[0].baseUrl || servers[0].server_url || '');
+          localStorage.setItem('streamflix_server_name', servers[0].display_name || servers[0].name || 'Servidor');
+        }
         onLoginSuccess();
       } else {
         setErrorMsg(data.error || 'Erro na autenticação.');

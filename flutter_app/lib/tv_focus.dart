@@ -8,6 +8,7 @@ class TvFocusable extends StatefulWidget {
   final bool enabled;
   final FocusNode? focusNode;
   final ValueChanged<bool>? onFocusChange;
+  final FocusOnKeyEventCallback? onKeyEvent;
 
   const TvFocusable({
     super.key,
@@ -17,6 +18,7 @@ class TvFocusable extends StatefulWidget {
     this.enabled = true,
     this.focusNode,
     this.onFocusChange,
+    this.onKeyEvent,
   });
 
   @override
@@ -40,36 +42,41 @@ class _TvFocusableState extends State<TvFocusable> {
     widget.onFocusChange?.call(focused);
   }
 
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || !widget.enabled) {
+      return KeyEventResult.ignored;
+    }
+
+    final key = event.logicalKey;
+    final customResult = widget.onKeyEvent?.call(node, event);
+    if (customResult == KeyEventResult.handled) {
+      return KeyEventResult.handled;
+    }
+
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.select ||
+        key == LogicalKeyboardKey.gameButtonA) {
+      _activate();
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Shortcuts(
-      shortcuts: const {
-        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
-        SingleActivator(LogicalKeyboardKey.select): ActivateIntent(),
-        SingleActivator(LogicalKeyboardKey.gameButtonA): ActivateIntent(),
-      },
-      child: Actions(
-        actions: {
-          ActivateIntent: CallbackAction<ActivateIntent>(
-            onInvoke: (_) {
-              _activate();
-              return null;
-            },
-          ),
-        },
-        child: FocusableActionDetector(
-          focusNode: widget.focusNode,
-          autofocus: widget.autofocus,
-          enabled: widget.enabled,
-          mouseCursor:
-              widget.enabled ? SystemMouseCursors.click : MouseCursor.defer,
-          onFocusChange: _setFocused,
-          onShowFocusHighlight: _setFocused,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.enabled ? _activate : null,
-            child: widget.builder(context, _focused),
-          ),
+    return Focus(
+      focusNode: widget.focusNode,
+      autofocus: widget.autofocus,
+      canRequestFocus: widget.enabled,
+      onFocusChange: _setFocused,
+      onKeyEvent: _handleKeyEvent,
+      child: MouseRegion(
+        cursor: widget.enabled ? SystemMouseCursors.click : MouseCursor.defer,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.enabled ? _activate : null,
+          child: widget.builder(context, _focused),
         ),
       ),
     );
