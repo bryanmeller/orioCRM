@@ -81,8 +81,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isFavorite = false;
   bool _channelMenuVisible = false;
   bool _isSwitchingLiveChannel = false;
+  bool _channelMenuShowingCategories = true;
+  bool _isExitingPlayer = false;
   String _focusedControl = 'progress';
+  int _focusedLiveCategoryIndex = 0;
   int _focusedLiveChannelIndex = 0;
+  String _selectedLiveCategoryId = '';
+  DateTime? _lastBackActionAt;
   Duration _lastPosition = Duration.zero;
   int _lastSavedProgressSecond = -1;
 
@@ -232,6 +237,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
         nextShowing: '',
       ),
     ];
+  }
+
+  List<_LiveCategoryOption> get _liveCategories {
+    final channels = _liveChannels;
+    final categories = <_LiveCategoryOption>[];
+    final seen = <String>{};
+    for (final channel in channels) {
+      final id = channel.categoryId.isNotEmpty
+          ? channel.categoryId
+          : channel.category.isNotEmpty
+              ? channel.category
+              : 'geral';
+      if (seen.add(id)) {
+        categories.add(
+          _LiveCategoryOption(
+            id: id,
+            label: channel.category.isNotEmpty ? channel.category : 'Geral',
+          ),
+        );
+      }
+    }
+    return categories;
+  }
+
+  List<IptvContentItem> get _selectedLiveCategoryChannels {
+    final channels = _liveChannels;
+    if (_selectedLiveCategoryId.isEmpty) {
+      return channels;
+    }
+    return channels.where((channel) {
+      final id = channel.categoryId.isNotEmpty
+          ? channel.categoryId
+          : channel.category.isNotEmpty
+              ? channel.category
+              : 'geral';
+      return id == _selectedLiveCategoryId;
+    }).toList();
   }
 
   int _initialLiveChannelIndex() {
@@ -533,7 +575,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     });
     _mediaKitErrorSubscription = player.stream.error.listen((error) {
-      if (mounted) {
+      if (mounted && _hasStartedPlayback) {
         setState(() => _errorMessage = error);
       }
     });
@@ -843,7 +885,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   KeyEventResult _handlePlayerKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
 
@@ -852,6 +894,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.goBack || key == LogicalKeyboardKey.escape) {
+      _handleBackPressed();
+      return KeyEventResult.handled;
+    }
+
     if (_isLiveContent &&
         (key == LogicalKeyboardKey.enter ||
             key == LogicalKeyboardKey.select ||
@@ -893,27 +940,52 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   KeyEventResult _handleChannelMenuKey(LogicalKeyboardKey key) {
-    final channels = _liveChannels;
-    if (key == LogicalKeyboardKey.goBack ||
-        key == LogicalKeyboardKey.escape ||
-        key == LogicalKeyboardKey.arrowLeft) {
-      _closeChannelMenu();
+    if (key == LogicalKeyboardKey.goBack || key == LogicalKeyboardKey.escape) {
+      _handleBackPressed();
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.arrowUp) {
-      _moveFocusedLiveChannel(-1, channels);
+      if (_channelMenuShowingCategories) {
+        _moveFocusedLiveCategory(-1);
+      } else {
+        _moveFocusedLiveChannel(-1, _selectedLiveCategoryChannels);
+      }
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.arrowDown) {
-      _moveFocusedLiveChannel(1, channels);
+      if (_channelMenuShowingCategories) {
+        _moveFocusedLiveCategory(1);
+      } else {
+        _moveFocusedLiveChannel(1, _selectedLiveCategoryChannels);
+      }
+      return KeyEventResult.handled;
+    }
+
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (_channelMenuShowingCategories) {
+        _closeChannelMenu();
+      } else {
+        setState(() => _channelMenuShowingCategories = true);
+        _scrollFocusedLiveChannelIntoView();
+      }
+      return KeyEventResult.handled;
+    }
+
+    if (key == LogicalKeyboardKey.arrowRight && _channelMenuShowingCategories) {
+      _openFocusedLiveCategory();
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.select ||
         key == LogicalKeyboardKey.gameButtonA) {
+      if (_channelMenuShowingCategories) {
+        _openFocusedLiveCategory();
+        return KeyEventResult.handled;
+      }
+      final channels = _selectedLiveCategoryChannels;
       if (channels.isNotEmpty && !_isSwitchingLiveChannel) {
         unawaited(_playLiveChannel(channels[_focusedLiveChannelIndex]));
       }
@@ -921,6 +993,56 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     return KeyEventResult.handled;
+  }
+
+  void _backFromChannelMenu() {
+    if (!_channelMenuVisible) {
+      return;
+    }
+    if (!_channelMenuShowingCategories) {
+      setState(() => _channelMenuShowingCategories = true);
+      _scrollFocusedLiveChannelIntoView();
+      return;
+    }
+    _closeChannelMenu();
+  }
+
+  void _handleBackPressed() {
+    if (_isDuplicateBackPress()) {
+      return;
+    }
+    if (_channelMenuVisible) {
+      _backFromChannelMenu();
+      return;
+    }
+    _exitPlayer();
+  }
+
+  bool _isDuplicateBackPress() {
+    final now = DateTime.now();
+    final last = _lastBackActionAt;
+    if (last != null &&
+        now.difference(last) < const Duration(milliseconds: 300)) {
+      return true;
+    }
+    _lastBackActionAt = now;
+    return false;
+  }
+
+  void _exitPlayer() {
+    if (_isExitingPlayer) {
+      return;
+    }
+    _isExitingPlayer = true;
+    Future<void>.delayed(const Duration(milliseconds: 120), () {
+      if (!mounted) {
+        return;
+      }
+      final navigator = Navigator.of(context);
+      if (navigator.canPop()) {
+        navigator.pop();
+      }
+    });
   }
 
   void _openChannelMenu() {
@@ -933,10 +1055,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _activeVideoUrl.isNotEmpty ? _activeVideoUrl : widget.videoUrl;
       return item.id == _activeFavoriteId || item.streamUrl == activeUrl;
     });
+    final activeChannel = activeIndex >= 0 && activeIndex < channels.length
+        ? channels[activeIndex]
+        : null;
+    final activeCategoryId = activeChannel == null
+        ? ''
+        : activeChannel.categoryId.isNotEmpty
+            ? activeChannel.categoryId
+            : activeChannel.category.isNotEmpty
+                ? activeChannel.category
+                : 'geral';
+    final categories = _liveCategories;
+    final categoryIndex =
+        categories.indexWhere((category) => category.id == activeCategoryId);
     setState(() {
       _channelMenuVisible = true;
+      _channelMenuShowingCategories = true;
       _controlsVisible = false;
-      _focusedLiveChannelIndex = activeIndex >= 0 ? activeIndex : 0;
+      _focusedLiveCategoryIndex = categoryIndex >= 0 ? categoryIndex : 0;
+      _selectedLiveCategoryId = activeCategoryId;
+      _focusedLiveChannelIndex = 0;
     });
     _controlsTimer?.cancel();
     _playerFocusNode.requestFocus();
@@ -955,6 +1093,41 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final nextIndex =
         (_focusedLiveChannelIndex + delta).clamp(0, channels.length - 1);
     setState(() => _focusedLiveChannelIndex = nextIndex);
+    _scrollFocusedLiveChannelIntoView();
+  }
+
+  void _moveFocusedLiveCategory(int delta) {
+    final categories = _liveCategories;
+    if (categories.isEmpty) {
+      return;
+    }
+    final nextIndex =
+        (_focusedLiveCategoryIndex + delta).clamp(0, categories.length - 1);
+    setState(() => _focusedLiveCategoryIndex = nextIndex);
+    _scrollFocusedLiveChannelIntoView();
+  }
+
+  void _openFocusedLiveCategory() {
+    final categories = _liveCategories;
+    if (categories.isEmpty) {
+      return;
+    }
+    final category =
+        categories[_focusedLiveCategoryIndex.clamp(0, categories.length - 1)];
+    final channels = _liveChannels.where((channel) {
+      final id = channel.categoryId.isNotEmpty
+          ? channel.categoryId
+          : channel.category.isNotEmpty
+              ? channel.category
+              : 'geral';
+      return id == category.id;
+    }).toList();
+    final activeIndex = _activeLiveChannelIndex(channels);
+    setState(() {
+      _selectedLiveCategoryId = category.id;
+      _channelMenuShowingCategories = false;
+      _focusedLiveChannelIndex = activeIndex >= 0 ? activeIndex : 0;
+    });
     _scrollFocusedLiveChannelIntoView();
   }
 
@@ -1012,14 +1185,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
         return;
       }
       const itemExtent = 86.0;
-      final target = (_focusedLiveChannelIndex * itemExtent).clamp(
+      final index = _channelMenuShowingCategories
+          ? _focusedLiveCategoryIndex
+          : _focusedLiveChannelIndex;
+      final target = (index * itemExtent).clamp(
         0.0,
         _channelMenuScrollController.position.maxScrollExtent,
       );
       _channelMenuScrollController.animateTo(
         target,
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOutCubic,
+        duration: const Duration(milliseconds: 70),
+        curve: Curves.linear,
       );
     });
   }
@@ -1414,10 +1590,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: !_channelMenuVisible,
+      canPop: false,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _channelMenuVisible) {
-          _closeChannelMenu();
+        if (!didPop) {
+          _handleBackPressed();
         }
       },
       child: Scaffold(
@@ -1555,8 +1731,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Widget _buildChannelMenu() {
-    final channels = _liveChannels;
+    final categories = _liveCategories;
+    final channels = _selectedLiveCategoryChannels;
+    _LiveCategoryOption? selectedCategory;
+    for (final category in categories) {
+      if (category.id == _selectedLiveCategoryId) {
+        selectedCategory = category;
+        break;
+      }
+    }
     final padding = tvOverscanPadding(context);
+    final title = _channelMenuShowingCategories
+        ? 'Categorias'
+        : selectedCategory?.label ?? 'Canais';
 
     return Container(
       color: const Color(0x33000000),
@@ -1591,44 +1778,156 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   decoration: const BoxDecoration(
                     border: Border(bottom: BorderSide(color: Colors.white10)),
                   ),
-                  child: const Row(
+                  child: Row(
                     children: [
-                      Icon(Icons.live_tv, color: Color(0xFFB47CFF), size: 22),
-                      SizedBox(width: 10),
-                      Text(
-                        'TV ao Vivo',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w900,
+                      const Icon(
+                        Icons.live_tv,
+                        color: Color(0xFFB47CFF),
+                        size: 22,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w900,
+                          ),
                         ),
                       ),
+                      if (!_channelMenuShowingCategories)
+                        const Icon(
+                          Icons.keyboard_arrow_left_rounded,
+                          color: Colors.white54,
+                          size: 22,
+                        ),
                     ],
                   ),
                 ),
                 Expanded(
-                  child: channels.isEmpty
-                      ? const Center(
-                          child: Text(
-                            'Nenhum canal disponivel.',
-                            style: TextStyle(color: Colors.white70),
-                          ),
-                        )
-                      : ListView.builder(
-                          controller: _channelMenuScrollController,
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          itemCount: channels.length,
-                          itemBuilder: (context, index) {
-                            return _buildChannelMenuItem(
-                              channels[index],
-                              index,
-                            );
-                          },
-                        ),
+                  child: _channelMenuShowingCategories
+                      ? categories.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'Nenhuma categoria disponivel.',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: _channelMenuScrollController,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              itemCount: categories.length,
+                              itemBuilder: (context, index) {
+                                return _buildChannelCategoryMenuItem(
+                                  categories[index],
+                                  index,
+                                );
+                              },
+                            )
+                      : channels.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'Nenhum canal nesta categoria.',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: _channelMenuScrollController,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              itemCount: channels.length,
+                              itemBuilder: (context, index) {
+                                return _buildChannelMenuItem(
+                                  channels[index],
+                                  index,
+                                );
+                              },
+                            ),
                 ),
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChannelCategoryMenuItem(
+    _LiveCategoryOption category,
+    int index,
+  ) {
+    final focused = index == _focusedLiveCategoryIndex;
+    final count = _liveChannels.where((channel) {
+      final id = channel.categoryId.isNotEmpty
+          ? channel.categoryId
+          : channel.category.isNotEmpty
+              ? channel.category
+              : 'geral';
+      return id == category.id;
+    }).length;
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        setState(() => _focusedLiveCategoryIndex = index);
+        _openFocusedLiveCategory();
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        height: 74,
+        margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          color: focused ? const Color(0xAA6A00FF) : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: focused ? const Color(0xFFB47CFF) : Colors.transparent,
+            width: focused ? 2 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.folder_rounded,
+              color: Color(0xFFB47CFF),
+              size: 26,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    category.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    '$count canais',
+                    style: TextStyle(
+                      color: focused ? Colors.white70 : Colors.white54,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: Colors.white54,
+              size: 22,
+            ),
+          ],
         ),
       ),
     );
@@ -2130,5 +2429,15 @@ class _RendererMode {
   const _RendererMode({
     required this.label,
     required this.viewType,
+  });
+}
+
+class _LiveCategoryOption {
+  final String id;
+  final String label;
+
+  const _LiveCategoryOption({
+    required this.id,
+    required this.label,
   });
 }
