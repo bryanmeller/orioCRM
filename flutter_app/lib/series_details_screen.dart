@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'api_service.dart';
+import 'player_return_guard.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
@@ -101,23 +102,32 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: TvOverscanSafeArea(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop || PlayerReturnGuard.consumeIfActive()) {
+          return;
+        }
+        Navigator.of(context).pop();
+      },
+      child: Scaffold(
         backgroundColor: Colors.black,
-        child: FutureBuilder<IptvSeriesDetails>(
-          future: _detailsFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return _buildLoading();
-            }
+        body: TvOverscanSafeArea(
+          backgroundColor: Colors.black,
+          child: FutureBuilder<IptvSeriesDetails>(
+            future: _detailsFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return _buildLoading();
+              }
 
-            if (snapshot.hasError || !snapshot.hasData) {
-              return _buildError(snapshot.error);
-            }
+              if (snapshot.hasError || !snapshot.hasData) {
+                return _buildError(snapshot.error);
+              }
 
-            return _buildDetails(snapshot.data!);
-          },
+              return _buildDetails(snapshot.data!);
+            },
+          ),
         ),
       ),
     );

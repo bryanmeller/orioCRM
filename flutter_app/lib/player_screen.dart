@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'api_service.dart';
+import 'player_return_guard.dart';
 import 'tv_safe_area.dart';
 
 class PlayerScreen extends StatefulWidget {
@@ -82,11 +83,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _channelMenuVisible = false;
   bool _isSwitchingLiveChannel = false;
   bool _channelMenuShowingCategories = true;
+  bool _channelMenuFavoriteFocused = false;
   bool _isExitingPlayer = false;
   String _focusedControl = 'progress';
   int _focusedLiveCategoryIndex = 0;
   int _focusedLiveChannelIndex = 0;
   String _selectedLiveCategoryId = '';
+  final Set<String> _favoriteIds = {};
   DateTime? _lastBackActionAt;
   Duration _lastPosition = Duration.zero;
   int _lastSavedProgressSecond = -1;
@@ -131,12 +134,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _loadFavoriteState() async {
-    if (_activeFavoriteId.isEmpty) {
-      return;
-    }
-    final isFavorite = await ApiService.isFavorite(_activeFavoriteId);
+    final favoriteIds = await ApiService.getFavoriteIds();
     if (mounted) {
-      setState(() => _isFavorite = isFavorite);
+      setState(() {
+        _favoriteIds
+          ..clear()
+          ..addAll(favoriteIds);
+        _isFavorite = _activeFavoriteId.isNotEmpty &&
+            favoriteIds.contains(_activeFavoriteId);
+      });
     }
   }
 
@@ -949,6 +955,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (_channelMenuShowingCategories) {
         _moveFocusedLiveCategory(-1);
       } else {
+        _channelMenuFavoriteFocused = false;
         _moveFocusedLiveChannel(-1, _selectedLiveCategoryChannels);
       }
       return KeyEventResult.handled;
@@ -958,23 +965,35 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (_channelMenuShowingCategories) {
         _moveFocusedLiveCategory(1);
       } else {
+        _channelMenuFavoriteFocused = false;
         _moveFocusedLiveChannel(1, _selectedLiveCategoryChannels);
       }
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.arrowLeft) {
+      if (!_channelMenuShowingCategories && _channelMenuFavoriteFocused) {
+        setState(() => _channelMenuFavoriteFocused = false);
+        return KeyEventResult.handled;
+      }
       if (_channelMenuShowingCategories) {
         _closeChannelMenu();
       } else {
-        setState(() => _channelMenuShowingCategories = true);
+        setState(() {
+          _channelMenuShowingCategories = true;
+          _channelMenuFavoriteFocused = false;
+        });
         _scrollFocusedLiveChannelIntoView();
       }
       return KeyEventResult.handled;
     }
 
-    if (key == LogicalKeyboardKey.arrowRight && _channelMenuShowingCategories) {
-      _openFocusedLiveCategory();
+    if (key == LogicalKeyboardKey.arrowRight) {
+      if (_channelMenuShowingCategories) {
+        _openFocusedLiveCategory();
+      } else if (_selectedLiveCategoryChannels.isNotEmpty) {
+        setState(() => _channelMenuFavoriteFocused = true);
+      }
       return KeyEventResult.handled;
     }
 
@@ -987,7 +1006,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       final channels = _selectedLiveCategoryChannels;
       if (channels.isNotEmpty && !_isSwitchingLiveChannel) {
-        unawaited(_playLiveChannel(channels[_focusedLiveChannelIndex]));
+        final channel = channels[_focusedLiveChannelIndex];
+        if (_channelMenuFavoriteFocused) {
+          unawaited(_toggleChannelFavorite(channel));
+        } else {
+          unawaited(_playLiveChannel(channel));
+        }
       }
       return KeyEventResult.handled;
     }
@@ -1000,7 +1024,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     if (!_channelMenuShowingCategories) {
-      setState(() => _channelMenuShowingCategories = true);
+      setState(() {
+        _channelMenuShowingCategories = true;
+        _channelMenuFavoriteFocused = false;
+      });
       _scrollFocusedLiveChannelIntoView();
       return;
     }
@@ -1034,6 +1061,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     _isExitingPlayer = true;
+    PlayerReturnGuard.arm();
     Future<void>.delayed(const Duration(milliseconds: 120), () {
       if (!mounted) {
         return;
@@ -1071,6 +1099,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       _channelMenuVisible = true;
       _channelMenuShowingCategories = true;
+      _channelMenuFavoriteFocused = false;
       _controlsVisible = false;
       _focusedLiveCategoryIndex = categoryIndex >= 0 ? categoryIndex : 0;
       _selectedLiveCategoryId = activeCategoryId;
@@ -1126,6 +1155,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       _selectedLiveCategoryId = category.id;
       _channelMenuShowingCategories = false;
+      _channelMenuFavoriteFocused = false;
       _focusedLiveChannelIndex = activeIndex >= 0 ? activeIndex : 0;
     });
     _scrollFocusedLiveChannelIntoView();
@@ -1184,14 +1214,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted || !_channelMenuScrollController.hasClients) {
         return;
       }
-      const itemExtent = 86.0;
+      final position = _channelMenuScrollController.position;
+      final itemExtent = _channelMenuShowingCategories ? 80.0 : 92.0;
+      const listPadding = 8.0;
+      const edgePadding = 6.0;
       final index = _channelMenuShowingCategories
           ? _focusedLiveCategoryIndex
           : _focusedLiveChannelIndex;
-      final target = (index * itemExtent).clamp(
-        0.0,
-        _channelMenuScrollController.position.maxScrollExtent,
-      );
+      final itemTop = listPadding + (index * itemExtent);
+      final itemBottom = itemTop + itemExtent;
+      final visibleTop = position.pixels + edgePadding;
+      final visibleBottom =
+          position.pixels + position.viewportDimension - edgePadding;
+
+      double target;
+      if (itemTop < visibleTop) {
+        target = itemTop - edgePadding;
+      } else if (itemBottom > visibleBottom) {
+        target = itemBottom - position.viewportDimension + edgePadding;
+      } else {
+        return;
+      }
+
+      target = target.clamp(0.0, position.maxScrollExtent);
       _channelMenuScrollController.animateTo(
         target,
         duration: const Duration(milliseconds: 70),
@@ -1227,8 +1272,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _activeContentId = ApiService.playbackContentId(channel);
       _activeFavoriteId = channel.id;
       _channelMenuVisible = false;
+      _channelMenuFavoriteFocused = false;
       _controlsVisible = false;
-      _isFavorite = false;
+      _isFavorite = _favoriteIds.contains(channel.id);
       _reconnectAttempts = 0;
       _lastPosition = Duration.zero;
       _hasStartedPlayback = false;
@@ -1421,9 +1467,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     final isFavorite = await ApiService.toggleFavorite(_activeFavoriteId);
     if (mounted) {
-      setState(() => _isFavorite = isFavorite);
+      setState(() {
+        _isFavorite = isFavorite;
+        if (isFavorite) {
+          _favoriteIds.add(_activeFavoriteId);
+        } else {
+          _favoriteIds.remove(_activeFavoriteId);
+        }
+      });
       _scheduleControlsHide();
     }
+  }
+
+  Future<void> _toggleChannelFavorite(IptvContentItem channel) async {
+    if (channel.id.isEmpty) {
+      return;
+    }
+    final isFavorite = await ApiService.toggleFavorite(channel.id);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      if (isFavorite) {
+        _favoriteIds.add(channel.id);
+      } else {
+        _favoriteIds.remove(channel.id);
+      }
+      if (channel.id == _activeFavoriteId) {
+        _isFavorite = isFavorite;
+      }
+    });
   }
 
   Future<void> _seekBy(Duration delta) async {
@@ -1935,6 +2008,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Widget _buildChannelMenuItem(IptvContentItem channel, int index) {
     final focused = index == _focusedLiveChannelIndex;
+    final favoriteFocused = focused && _channelMenuFavoriteFocused;
+    final channelFocused = focused && !_channelMenuFavoriteFocused;
+    final isFavorite = _favoriteIds.contains(channel.id);
     final active = channel.id == _activeFavoriteId ||
         (channel.streamUrl.isNotEmpty && channel.streamUrl == _activeVideoUrl);
 
@@ -1953,19 +2029,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: focused
+          color: channelFocused
               ? const Color(0xAA6A00FF)
               : active
                   ? const Color(0x4418191F)
                   : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: focused
+            color: channelFocused
                 ? const Color(0xFFB47CFF)
                 : active
                     ? const Color(0x886A00FF)
                     : Colors.transparent,
-            width: focused ? 2 : 1,
+            width: channelFocused ? 2 : 1,
           ),
         ),
         child: Row(
@@ -2008,6 +2084,40 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                   ),
                 ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                setState(() {
+                  _focusedLiveChannelIndex = index;
+                  _channelMenuFavoriteFocused = true;
+                });
+                unawaited(_toggleChannelFavorite(channel));
+              },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 120),
+                width: 42,
+                height: 42,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: favoriteFocused
+                      ? const Color(0xAA6A00FF)
+                      : const Color(0x6615161D),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: favoriteFocused
+                        ? const Color(0xFFB47CFF)
+                        : Colors.white12,
+                    width: favoriteFocused ? 2 : 1,
+                  ),
+                ),
+                child: Icon(
+                  isFavorite ? Icons.favorite : Icons.favorite_border,
+                  color: isFavorite ? const Color(0xFFB47CFF) : Colors.white70,
+                  size: 21,
+                ),
               ),
             ),
           ],

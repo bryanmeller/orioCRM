@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 import 'api_service.dart';
+import 'player_return_guard.dart';
 import 'reminder_service.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
@@ -368,6 +369,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _handleBackNavigation() async {
+    if (PlayerReturnGuard.consumeIfActive()) {
+      return;
+    }
+
     if (_activeSection != HomeSection.home) {
       _lastHomeBackPress = null;
       _selectSection(HomeSection.home);

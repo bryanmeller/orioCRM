@@ -843,6 +843,11 @@ class ApiService {
     return favorites.contains(favoriteId);
   }
 
+  static Future<Set<String>> getFavoriteIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getStringList('favorites') ?? []).toSet();
+  }
+
   static Future<bool> toggleFavorite(String favoriteId) async {
     if (favoriteId.isEmpty) {
       return false;
