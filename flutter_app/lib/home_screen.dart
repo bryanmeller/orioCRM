@@ -552,37 +552,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return _favorites.contains(item.id);
   }
 
-  String _favoriteActionLabel(IptvContentItem item) {
-    return _isFavorite(item) ? 'REMOVER' : 'FAVORITAR';
-  }
-
-  IconData _favoriteActionIcon(IptvContentItem item) {
-    return _isFavorite(item) ? Icons.heart_broken : Icons.favorite;
-  }
-
-  Future<void> _toggleFavorite(IptvContentItem item) async {
-    setState(() {
-      if (_favorites.contains(item.id)) {
-        _favorites.remove(item.id);
-      } else {
-        _favorites.add(item.id);
-      }
-
-      if (_activeSection == HomeSection.favorites) {
-        final items = _filteredItems;
-        if (items.isEmpty) {
-          _selectedItem = null;
-        } else if (_selectedItem == null ||
-            !items.any((content) => content.id == _selectedItem!.id)) {
-          _selectedItem = items.first;
-        }
-      }
-    });
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('favorites', _favorites.toList());
-  }
-
   bool _isOnDemandContent(IptvContentItem item) {
     return item.type == 'movie' ||
         item.type == 'series' ||
@@ -998,8 +967,6 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         children: [
           _buildCategoryRail(_activeCatalog.categories),
-          const SizedBox(height: 12),
-          _buildCatalogSummary(),
           const SizedBox(height: 12),
           Expanded(child: _buildCatalogList(_filteredItems)),
         ],
@@ -1625,75 +1592,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   visualDensity: VisualDensity.compact,
                 ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildCatalogSummary() {
-    final item = _selectedItem;
-    final count = _filteredItems.length;
-
-    return Container(
-      height: 92,
-      padding: const EdgeInsets.all(14),
-      decoration: _panelDecoration(radius: 18),
-      child: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: SizedBox(
-              width: 92,
-              height: 64,
-              child: _buildImage(item?.imageUrl ?? ''),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  item?.title ?? _activeSection.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '$count itens carregados - ${item?.category ?? 'Todas as categorias'}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white60,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          if (item != null)
-            _buildFocusButton(
-              icon: Icons.play_arrow,
-              label: 'ASSISTIR',
-              onPressed: () => _playItem(item),
-              moveLeftToSidebar: true,
-            ),
-          if (item != null) ...[
-            const SizedBox(width: 10),
-            _buildFocusButton(
-              icon: _favoriteActionIcon(item),
-              label: _favoriteActionLabel(item),
-              onPressed: () => _toggleFavorite(item),
-            ),
-          ],
-        ],
       ),
     );
   }
