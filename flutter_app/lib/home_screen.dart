@@ -47,6 +47,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final FocusNode _changeParentalPinFocusNode = FocusNode();
   final FocusNode _changeServerFocusNode = FocusNode();
   final FocusNode _logoutAccountFocusNode = FocusNode();
+  final FocusNode _refreshFocusNode = FocusNode();
   late final Map<HomeSection, FocusNode> _sidebarFocusNodes;
 
   IptvCatalog _liveCatalog = const IptvCatalog(categories: [], items: []);
@@ -61,6 +62,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<String> _activeReminderIds = {};
   final Map<String, FocusNode> _gameCardFocusNodes = {};
   final Map<String, FocusNode> _gameReminderFocusNodes = {};
+  final Map<String, FocusNode> _categoryFocusNodes = {};
 
   @override
   void initState() {
@@ -81,6 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _changeParentalPinFocusNode.dispose();
     _changeServerFocusNode.dispose();
     _logoutAccountFocusNode.dispose();
+    _refreshFocusNode.dispose();
     for (final node in _sidebarFocusNodes.values) {
       node.dispose();
     }
@@ -88,6 +91,9 @@ class _HomeScreenState extends State<HomeScreen> {
       node.dispose();
     }
     for (final node in _gameReminderFocusNodes.values) {
+      node.dispose();
+    }
+    for (final node in _categoryFocusNodes.values) {
       node.dispose();
     }
     _searchFocusNode.dispose();
@@ -459,9 +465,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _selectedItem = catalog.items.isNotEmpty ? catalog.items.first : null;
     });
 
-    if (section == HomeSection.settings) {
-      _focusSettingsFirstAction();
-    }
+    _focusFirstSelectedSectionItem(section);
   }
 
   void _expandSidebar() {
@@ -490,14 +494,6 @@ class _HomeScreenState extends State<HomeScreen> {
       (_sidebarFocusNodes[_activeSection] ??
               _sidebarFocusNodes[HomeSection.home])
           ?.requestFocus();
-    });
-  }
-
-  void _focusSettingsFirstAction() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        _parentalToggleFocusNode.requestFocus();
-      }
     });
   }
 
@@ -572,6 +568,51 @@ class _HomeScreenState extends State<HomeScreen> {
       id,
       () => FocusNode(debugLabel: 'game-reminder-$id'),
     );
+  }
+
+  FocusNode _categoryFocusNode(String id) {
+    return _categoryFocusNodes.putIfAbsent(
+      id,
+      () => FocusNode(debugLabel: 'category-$id'),
+    );
+  }
+
+  T? _firstOrNull<T>(Iterable<T> items) {
+    final iterator = items.iterator;
+    return iterator.moveNext() ? iterator.current : null;
+  }
+
+  void _focusFirstSelectedSectionItem(HomeSection section) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      switch (section) {
+        case HomeSection.settings:
+          _parentalToggleFocusNode.requestFocus();
+          return;
+        case HomeSection.live:
+        case HomeSection.movies:
+        case HomeSection.series:
+        case HomeSection.favorites:
+          final firstCategory = _firstOrNull(_activeCatalog.categories);
+          if (firstCategory != null) {
+            _categoryFocusNode(firstCategory.id).requestFocus();
+            return;
+          }
+          _refreshFocusNode.requestFocus();
+          return;
+        case HomeSection.home:
+          final firstGame = _firstOrNull(_gamesOfTheDayItems);
+          if (firstGame != null) {
+            _gameCardFocusNode(firstGame.id).requestFocus();
+            return;
+          }
+          _refreshFocusNode.requestFocus();
+          return;
+      }
+    });
   }
 
   KeyEventResult _handleGameCardKey(
@@ -1394,6 +1435,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(width: 12),
               ],
               TvFocusable(
+                focusNode: _refreshFocusNode,
                 onPressed: _loadHome,
                 onFocusChange: (focused) {
                   if (focused) {
@@ -2024,6 +2066,7 @@ class _HomeScreenState extends State<HomeScreen> {
           final category = categories[index];
           final active = _selectedCategory == category.id;
           return TvFocusable(
+            focusNode: _categoryFocusNode(category.id),
             onKeyEvent: _leftToSidebarKeyHandler(index == 0),
             onPressed: () => _selectCategory(category.id),
             onFocusChange: (focused) {

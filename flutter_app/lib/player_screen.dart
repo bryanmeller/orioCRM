@@ -275,10 +275,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Map<String, String> get _mediaKitHeaders => _iptvHeaders;
 
   Future<void> _openMedia() async {
-    final candidates = <String>[
+    final candidates = _orderedPlaybackCandidates([
       widget.videoUrl,
       ...widget.alternateVideoUrls,
-    ].map((url) => url.trim()).where((url) => url.isNotEmpty).toSet().toList();
+    ]);
 
     if (candidates.isEmpty) {
       setState(() => _errorMessage = 'URL do video invalida.');
@@ -304,10 +304,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     if (mounted) {
       setState(() {
-        _errorMessage = lastError?.toString() ??
-            'Nenhuma URL de reproducao funcionou para este conteudo.';
+        _errorMessage = _playbackFailureMessage(lastError);
       });
     }
+  }
+
+  String _playbackFailureMessage(Object? lastError) {
+    if (_isLiveContent) {
+      return 'Nao foi possivel abrir este canal. O app tentou as alternativas HLS/TS disponiveis, mas o stream pode estar fora do ar ou ser incompativel com esta TV.';
+    }
+    return lastError?.toString() ??
+        'Nenhuma URL de reproducao funcionou para este conteudo.';
   }
 
   Future<bool> _tryOpenCandidate(
@@ -454,7 +461,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       await _stopActivePlayback();
 
-      final player = media_kit.Player();
+      final player = media_kit.Player(
+        configuration: const media_kit.PlayerConfiguration(
+          bufferSize: 96 * 1024 * 1024,
+        ),
+      );
       final controller = media_kit_video.VideoController(player);
       _mediaKitPlayer = player;
       _mediaKitController = controller;
@@ -1077,18 +1088,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (mounted) {
       setState(() {
         _isSwitchingLiveChannel = false;
-        _errorMessage =
-            lastError?.toString() ?? 'Nao foi possivel abrir este canal.';
+        _errorMessage = _playbackFailureMessage(lastError);
       });
     }
   }
 
   List<String> _liveChannelCandidates(IptvContentItem channel) {
-    final candidates = [
+    return _orderedPlaybackCandidates([
       channel.streamUrl,
       ...channel.alternateStreamUrls,
-    ].map((url) => url.trim()).where((url) => url.isNotEmpty).toSet().toList();
+    ]);
+  }
 
+  List<String> _orderedPlaybackCandidates(Iterable<String> rawUrls) {
+    final candidates = rawUrls
+        .map((url) => url.trim())
+        .where((url) => url.isNotEmpty)
+        .toSet()
+        .toList();
     final extra = <String>[];
     for (final url in candidates) {
       final lower = url.toLowerCase();
@@ -1099,11 +1116,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     }
 
-    return [...candidates, ...extra]
+    final withFallbacks = [...candidates, ...extra]
         .map((url) => url.trim())
         .where((url) => url.isNotEmpty)
         .toSet()
         .toList();
+
+    if (!_isLiveContent) {
+      return withFallbacks;
+    }
+
+    withFallbacks.sort((a, b) {
+      final aScore = _liveCandidateScore(a);
+      final bScore = _liveCandidateScore(b);
+      return aScore.compareTo(bScore);
+    });
+    return withFallbacks;
+  }
+
+  int _liveCandidateScore(String url) {
+    final lower = url.toLowerCase();
+    if (lower.endsWith('.m3u8')) {
+      return 0;
+    }
+    if (lower.endsWith('.ts')) {
+      return 1;
+    }
+    return 2;
   }
 
   void _handleControlKey(LogicalKeyboardKey key) {
