@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -7,6 +9,9 @@ import 'home_screen.dart';
 import 'player_screen.dart';
 import 'series_details_screen.dart';
 import 'api_service.dart';
+import 'reminder_service.dart';
+
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,18 +26,92 @@ void main() async {
   final hasSavedSession = await ApiService.hasSavedSession();
   final initialRoute = hasSavedSession ? '/home' : '/';
 
-  runApp(StreamFlixApp(initialRoute: initialRoute));
+  runApp(
+    StreamFlixApp(
+      initialRoute: initialRoute,
+    ),
+  );
+
+  unawaited(_initializeRemindersAfterStartup());
 }
 
-class StreamFlixApp extends StatelessWidget {
-  final String initialRoute;
+Future<void> _initializeRemindersAfterStartup() async {
+  try {
+    await ReminderService.initialize();
+    final eventId = ReminderService.eventIdFromPayload(
+        ReminderService.consumeInitialPayload());
+    if (eventId == null || eventId.isEmpty) {
+      return;
+    }
+    ReminderService.tapPayload.value =
+        ReminderService.payloadForEventId(eventId);
+  } catch (error) {
+    debugPrint('ReminderService initialization failed: $error');
+  }
+}
 
-  const StreamFlixApp({Key? key, required this.initialRoute}) : super(key: key);
+class StreamFlixApp extends StatefulWidget {
+  final String initialRoute;
+  final String? initialReminderEventId;
+
+  const StreamFlixApp({
+    Key? key,
+    required this.initialRoute,
+    this.initialReminderEventId,
+  }) : super(key: key);
+
+  @override
+  State<StreamFlixApp> createState() => _StreamFlixAppState();
+}
+
+class _StreamFlixAppState extends State<StreamFlixApp> {
+  late final Stream<String> _notificationTapStream;
+  StreamSubscription<String>? _notificationTapSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _notificationTapStream = ReminderService.tapPayload.stream;
+    _notificationTapSubscription = _notificationTapStream.listen(
+      _handleNotificationPayload,
+    );
+  }
+
+  @override
+  void dispose() {
+    _notificationTapSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _handleNotificationPayload(String payload) async {
+    final eventId = ReminderService.eventIdFromPayload(payload);
+    if (eventId == null || eventId.isEmpty) {
+      return;
+    }
+
+    final hasSavedSession = await ApiService.hasSavedSession();
+    final navigator = appNavigatorKey.currentState;
+    if (navigator == null) {
+      return;
+    }
+
+    if (!hasSavedSession) {
+      navigator.pushNamedAndRemoveUntil('/', (route) => false);
+      return;
+    }
+
+    navigator.pushNamedAndRemoveUntil(
+      '/home',
+      (route) => false,
+      arguments: {'reminderEventId': eventId},
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'StreamFlix TV',
+      navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -49,7 +128,7 @@ class StreamFlixApp extends StatelessWidget {
           labelStyle: const TextStyle(color: Colors.grey),
         ),
       ),
-      initialRoute: initialRoute,
+      initialRoute: widget.initialRoute,
       onGenerateRoute: (settings) {
         switch (settings.name) {
           case '/':
@@ -60,7 +139,15 @@ class StreamFlixApp extends StatelessWidget {
               builder: (_) => _LoginGate(deviceId: deviceId),
             );
           case '/home':
-            return MaterialPageRoute(builder: (_) => const HomeScreen());
+            final args = settings.arguments as Map<String, dynamic>? ?? {};
+            final reminderEventId =
+                (args['reminderEventId'] ?? widget.initialReminderEventId)
+                    ?.toString();
+            return MaterialPageRoute(
+              builder: (_) => HomeScreen(
+                initialReminderEventId: reminderEventId,
+              ),
+            );
           case '/player':
             final args = settings.arguments as Map<String, dynamic>? ?? {};
             final alternateVideoUrls = (args['alternateVideoUrls'] is List)

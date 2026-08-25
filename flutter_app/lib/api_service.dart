@@ -69,6 +69,7 @@ class IptvContentItem {
   final String? rating;
   final String? year;
   final String description;
+  final DateTime? eventStartDateTime;
 
   const IptvContentItem({
     required this.id,
@@ -84,6 +85,7 @@ class IptvContentItem {
     this.rating,
     this.year,
     this.description = '',
+    this.eventStartDateTime,
   });
 }
 
@@ -351,12 +353,13 @@ class ApiService {
         streamUrl: streamUrl,
         alternateStreamUrls:
             generatedUrls.where((url) => url != streamUrl).toList(),
-        imageUrl: _stringValue(item['stream_icon']),
+        imageUrl: _imageUrl(item, server),
         type: 'live',
         description: _stringValue(
           item['description'] ?? item['plot'] ?? item['overview'],
         ),
         nextShowing: _formatProgramNext(item),
+        eventStartDateTime: _eventStartDateTime(item),
       );
     }).toList();
 
@@ -402,7 +405,7 @@ class ApiService {
         category: _categoryName(categoryMap, catId),
         categoryId: catId,
         streamUrl: streamUrl,
-        imageUrl: _stringValue(item['stream_icon'] ?? item['cover']),
+        imageUrl: _imageUrl(item, server),
         type: 'movie',
         rating: _rating(item),
         year: year.isNotEmpty ? year : null,
@@ -450,7 +453,7 @@ class ApiService {
         category: _categoryName(categoryMap, catId),
         categoryId: catId,
         streamUrl: '',
-        imageUrl: _stringValue(item['cover']),
+        imageUrl: _imageUrl(item, server),
         type: 'series',
         rating: _rating(item),
         year: year.isNotEmpty ? year : null,
@@ -1006,6 +1009,231 @@ class ApiService {
     }
 
     return '';
+  }
+
+  static DateTime? _eventStartDateTime(Map<String, dynamic> item) {
+    final timestamp = _eventTimestamp(item);
+    if (timestamp != null) {
+      return timestamp;
+    }
+
+    final titleTime = _timeFromText(
+      [
+        _stringValue(item['name'] ?? item['stream_name']),
+        _stringValue(item['title']),
+      ].join(' '),
+    );
+    if (titleTime != null) {
+      final date = _dateFromEventFields(item) ?? DateTime.now();
+      return DateTime(
+        date.year,
+        date.month,
+        date.day,
+        titleTime.$1,
+        titleTime.$2,
+      );
+    }
+
+    final combined = _eventDateTimeFromFields(item);
+    if (combined != null) {
+      return combined;
+    }
+
+    final textTime = _timeFromText(
+      [
+        _stringValue(item['name'] ?? item['stream_name']),
+        _stringValue(item['title']),
+        _stringValue(item['epg_now']),
+        _stringValue(item['current_program']),
+      ].join(' '),
+    );
+    if (textTime == null) {
+      return null;
+    }
+
+    final now = DateTime.now();
+    return DateTime(
+      now.year,
+      now.month,
+      now.day,
+      textTime.$1,
+      textTime.$2,
+    );
+  }
+
+  static DateTime? _eventTimestamp(Map<String, dynamic> item) {
+    for (final key in [
+      'start_timestamp',
+      'event_timestamp',
+      'timestamp',
+      'startTimeTimestamp',
+      'start_time_unix',
+    ]) {
+      final raw = _stringValue(item[key]);
+      if (raw.isEmpty) {
+        continue;
+      }
+      final parsed = int.tryParse(raw);
+      if (parsed == null || parsed <= 0) {
+        continue;
+      }
+      final millis = parsed > 9999999999 ? parsed : parsed * 1000;
+      return DateTime.fromMillisecondsSinceEpoch(millis);
+    }
+    return null;
+  }
+
+  static DateTime? _eventDateTimeFromFields(Map<String, dynamic> item) {
+    final dateValue = _firstStringValue(item, [
+      'event_date',
+      'start_date',
+      'date',
+      'startDate',
+      'eventDate',
+    ]);
+    final timeValue = _firstStringValue(item, [
+      'event_time',
+      'start_time',
+      'time',
+      'startTime',
+    ]);
+
+    if (dateValue.isNotEmpty) {
+      final direct = DateTime.tryParse(
+        timeValue.isNotEmpty ? '$dateValue $timeValue' : dateValue,
+      );
+      if (direct != null) {
+        return direct;
+      }
+    }
+
+    final time = _timeFromText(timeValue);
+    if (time == null) {
+      return null;
+    }
+
+    final date = _dateFromText(dateValue) ?? DateTime.now();
+    return DateTime(date.year, date.month, date.day, time.$1, time.$2);
+  }
+
+  static DateTime? _dateFromEventFields(Map<String, dynamic> item) {
+    return _dateFromText(
+      _firstStringValue(item, [
+        'event_date',
+        'start_date',
+        'date',
+        'startDate',
+        'eventDate',
+      ]),
+    );
+  }
+
+  static String _imageUrl(Map<String, dynamic> item, IptvServer server) {
+    final nestedInfo = item['info'];
+    final nested = nestedInfo is Map
+        ? Map<String, dynamic>.from(nestedInfo)
+        : <String, dynamic>{};
+    final candidates = [
+      item['stream_icon'],
+      item['cover'],
+      item['cover_big'],
+      item['movie_image'],
+      item['poster'],
+      item['poster_path'],
+      item['image'],
+      item['imageUrl'],
+      item['logo'],
+      nested['cover'],
+      nested['cover_big'],
+      nested['movie_image'],
+      nested['poster'],
+      nested['poster_path'],
+      nested['image'],
+      nested['imageUrl'],
+      if (item['backdrop_path'] is List &&
+          (item['backdrop_path'] as List).isNotEmpty)
+        (item['backdrop_path'] as List).first,
+      if (nested['backdrop_path'] is List &&
+          (nested['backdrop_path'] as List).isNotEmpty)
+        (nested['backdrop_path'] as List).first,
+    ];
+
+    for (final candidate in candidates) {
+      final url = _normalizeImageUrl(_stringValue(candidate), server);
+      if (url.isNotEmpty) {
+        return url;
+      }
+    }
+    return '';
+  }
+
+  static String _normalizeImageUrl(String value, IptvServer server) {
+    final url = value.trim();
+    if (url.isEmpty) {
+      return '';
+    }
+    if (url.startsWith('//')) {
+      return 'http:$url';
+    }
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    if (url.startsWith('/')) {
+      return '${server.cleanBaseUrl}$url';
+    }
+    return url;
+  }
+
+  static String _firstStringValue(
+      Map<String, dynamic> item, List<String> keys) {
+    for (final key in keys) {
+      final value = _stringValue(item[key]);
+      if (value.isNotEmpty) {
+        return value;
+      }
+    }
+    return '';
+  }
+
+  static DateTime? _dateFromText(String value) {
+    final normalized = value.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    final iso = DateTime.tryParse(normalized);
+    if (iso != null) {
+      return iso;
+    }
+    final match = RegExp(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b')
+        .firstMatch(normalized);
+    if (match == null) {
+      return null;
+    }
+    final now = DateTime.now();
+    final day = int.tryParse(match.group(1) ?? '');
+    final month = int.tryParse(match.group(2) ?? '');
+    var year = int.tryParse(match.group(3) ?? '') ?? now.year;
+    if (year < 100) {
+      year += 2000;
+    }
+    if (day == null || month == null) {
+      return null;
+    }
+    return DateTime(year, month, day);
+  }
+
+  static (int, int)? _timeFromText(String value) {
+    final match =
+        RegExp(r'\b([01]?\d|2[0-3])[:hH]([0-5]\d)\b').firstMatch(value);
+    if (match == null) {
+      return null;
+    }
+    final hour = int.tryParse(match.group(1) ?? '');
+    final minute = int.tryParse(match.group(2) ?? '');
+    if (hour == null || minute == null) {
+      return null;
+    }
+    return (hour, minute);
   }
 
   static Map<String, dynamic> _decodeObject(String body) {

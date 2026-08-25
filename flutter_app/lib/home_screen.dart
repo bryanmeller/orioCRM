@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 import 'api_service.dart';
+import 'reminder_service.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
@@ -22,7 +23,9 @@ enum HomeSection {
 }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final String? initialReminderEventId;
+
+  const HomeScreen({super.key, this.initialReminderEventId});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -54,6 +57,10 @@ class _HomeScreenState extends State<HomeScreen> {
   DateTime? _lastHomeBackPress;
   bool _sidebarExpanded = true;
   bool _adultContentBlocked = false;
+  String? _pendingReminderEventId;
+  final Set<String> _activeReminderIds = {};
+  final Map<String, FocusNode> _gameCardFocusNodes = {};
+  final Map<String, FocusNode> _gameReminderFocusNodes = {};
 
   @override
   void initState() {
@@ -62,6 +69,7 @@ class _HomeScreenState extends State<HomeScreen> {
       for (final section in HomeSection.values) section: FocusNode(),
     };
     _searchFocusNode.addListener(_handleSearchFocusChange);
+    _pendingReminderEventId = widget.initialReminderEventId;
     _loadHome();
   }
 
@@ -74,6 +82,12 @@ class _HomeScreenState extends State<HomeScreen> {
     _changeServerFocusNode.dispose();
     _logoutAccountFocusNode.dispose();
     for (final node in _sidebarFocusNodes.values) {
+      node.dispose();
+    }
+    for (final node in _gameCardFocusNodes.values) {
+      node.dispose();
+    }
+    for (final node in _gameReminderFocusNodes.values) {
       node.dispose();
     }
     _searchFocusNode.dispose();
@@ -102,6 +116,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final savedFavorites = prefs.getStringList('favorites') ?? [];
       final continueWatching = await ApiService.getContinueWatchingItems();
       final adultContentBlocked = await ApiService.isAdultContentBlocked();
+      final activeReminders = await ReminderService.getActiveReminders();
       final serverName = server?.name ??
           prefs.getString('selected_server_name') ??
           'Servidor Desconhecido';
@@ -130,6 +145,9 @@ class _HomeScreenState extends State<HomeScreen> {
         _favorites
           ..clear()
           ..addAll(savedFavorites);
+        _activeReminderIds
+          ..clear()
+          ..addAll(activeReminders.keys);
         _selectedItem = _visibleLiveCatalog.items.isNotEmpty
             ? _visibleLiveCatalog.items.first
             : _visibleMovieCatalog.items.isNotEmpty
@@ -139,6 +157,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     : null;
         _loading = false;
       });
+      _openPendingReminderIfNeeded();
     } catch (error) {
       if (!mounted) {
         return;
@@ -148,6 +167,36 @@ class _HomeScreenState extends State<HomeScreen> {
         _errorMessage = _friendlyError(error);
       });
     }
+  }
+
+  void _openPendingReminderIfNeeded() {
+    final eventId = _pendingReminderEventId;
+    if (eventId == null || eventId.isEmpty) {
+      return;
+    }
+    _pendingReminderEventId = null;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) {
+        return;
+      }
+      final event = _findGameDayEvent(eventId) ??
+          (await ReminderService.getActiveReminders())[eventId]
+              ?.toContentItem();
+      if (!mounted || event == null) {
+        return;
+      }
+      await _playItem(event);
+    });
+  }
+
+  IptvContentItem? _findGameDayEvent(String eventId) {
+    for (final item in _gamesOfTheDayItems) {
+      if (item.id == eventId) {
+        return item;
+      }
+    }
+    return null;
   }
 
   String _friendlyError(Object error) {
@@ -511,6 +560,59 @@ class _HomeScreenState extends State<HomeScreen> {
     return (node, event) => _handleContentFocusableKey(node, event);
   }
 
+  FocusNode _gameCardFocusNode(String id) {
+    return _gameCardFocusNodes.putIfAbsent(
+      id,
+      () => FocusNode(debugLabel: 'game-card-$id'),
+    );
+  }
+
+  FocusNode _gameReminderFocusNode(String id) {
+    return _gameReminderFocusNodes.putIfAbsent(
+      id,
+      () => FocusNode(debugLabel: 'game-reminder-$id'),
+    );
+  }
+
+  KeyEventResult _handleGameCardKey(
+    IptvContentItem item,
+    bool moveLeftToSidebar,
+    FocusNode reminderFocusNode,
+    KeyEvent event,
+  ) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowUp &&
+        (_hasReminder(item) || _canScheduleReminder(item))) {
+      reminderFocusNode.requestFocus();
+      return KeyEventResult.handled;
+    }
+
+    return _handleContentFocusableKey(
+      reminderFocusNode,
+      event,
+      moveLeftToSidebar: moveLeftToSidebar,
+    );
+  }
+
+  KeyEventResult _handleGameReminderKey(
+    FocusNode cardFocusNode,
+    KeyEvent event,
+  ) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+      cardFocusNode.requestFocus();
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
+  }
+
   void _selectCategory(String categoryId) {
     setState(() {
       _selectedCategory = categoryId;
@@ -601,6 +703,69 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _isFavorite(IptvContentItem item) {
     return _favorites.contains(item.id);
+  }
+
+  bool _hasReminder(IptvContentItem item) {
+    return _activeReminderIds.contains(item.id);
+  }
+
+  bool _canScheduleReminder(IptvContentItem item) {
+    final start = item.eventStartDateTime;
+    if (start == null) {
+      return false;
+    }
+    return start.isAfter(DateTime.now());
+  }
+
+  Future<void> _toggleGameReminder(IptvContentItem item) async {
+    try {
+      if (_hasReminder(item)) {
+        await ReminderService.cancelGameReminder(item.id);
+        if (!mounted) {
+          return;
+        }
+        setState(() => _activeReminderIds.remove(item.id));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Lembrete removido.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+
+      if (!_canScheduleReminder(item)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Nao e possivel criar lembrete para este evento.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+
+      await ReminderService.scheduleGameReminder(item);
+      if (!mounted) {
+        return;
+      }
+      setState(() => _activeReminderIds.add(item.id));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Lembrete ativado para 15 minutos antes do evento.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceAll('Exception: ', '')),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   bool _isOnDemandContent(IptvContentItem item) {
@@ -1718,8 +1883,19 @@ class _HomeScreenState extends State<HomeScreen> {
     required double width,
     bool moveLeftToSidebar = false,
   }) {
+    final hasReminder = _hasReminder(item);
+    final canScheduleReminder = _canScheduleReminder(item);
+    final cardFocusNode = _gameCardFocusNode(item.id);
+    final reminderFocusNode = _gameReminderFocusNode(item.id);
+
     return TvFocusable(
-      onKeyEvent: _leftToSidebarKeyHandler(moveLeftToSidebar),
+      focusNode: cardFocusNode,
+      onKeyEvent: (_, event) => _handleGameCardKey(
+        item,
+        moveLeftToSidebar,
+        reminderFocusNode,
+        event,
+      ),
       onPressed: () => _playItem(item),
       onFocusChange: (focused) {
         if (focused) {
@@ -1754,27 +1930,48 @@ class _HomeScreenState extends State<HomeScreen> {
               left: 10,
               child: _buildBadge('AO VIVO'),
             ),
-            Positioned(
-              right: 8,
-              top: 8,
-              child: Container(
-                width: 32,
-                height: 32,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: const Color(0xAA101216),
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: Icon(
-                  _isFavorite(item) ? Icons.favorite : Icons.favorite_border,
-                  color: _isFavorite(item)
-                      ? const Color(0xFFB47CFF)
-                      : Colors.white,
-                  size: 20,
+            if (hasReminder || canScheduleReminder)
+              Positioned(
+                right: 8,
+                top: 8,
+                child: TvFocusable(
+                  focusNode: reminderFocusNode,
+                  onKeyEvent: (_, event) =>
+                      _handleGameReminderKey(cardFocusNode, event),
+                  onPressed: () => _toggleGameReminder(item),
+                  onFocusChange: (focused) {
+                    if (focused) {
+                      _collapseSidebar();
+                      setState(() => _selectedItem = item);
+                    }
+                  },
+                  builder: (context, bellFocused) => AnimatedContainer(
+                    duration: const Duration(milliseconds: 120),
+                    width: 34,
+                    height: 34,
+                    alignment: Alignment.center,
+                    decoration: tvFocusDecoration(
+                      focused: bellFocused,
+                      baseColor: hasReminder
+                          ? const Color(0xFFB47CFF)
+                          : const Color(0xCC101216),
+                      radius: 999,
+                      borderColor: hasReminder
+                          ? const Color(0xFFB47CFF)
+                          : Colors.white24,
+                      focusedColor: Colors.white,
+                    ),
+                    child: Icon(
+                      hasReminder
+                          ? Icons.notifications_active_rounded
+                          : Icons.notifications_none_rounded,
+                      color:
+                          hasReminder ? const Color(0xFF101216) : Colors.white,
+                      size: 20,
+                    ),
+                  ),
                 ),
               ),
-            ),
             Positioned(
               left: 12,
               right: 12,
