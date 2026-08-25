@@ -40,6 +40,8 @@ class _HomeScreenState extends State<HomeScreen> {
       NativeTextFieldController();
   final FocusNode _searchFocusNode = FocusNode();
   final FocusNode _homeKeyboardFocusNode = FocusNode();
+  final FocusNode _parentalToggleFocusNode = FocusNode();
+  final FocusNode _changeParentalPinFocusNode = FocusNode();
   final FocusNode _changeServerFocusNode = FocusNode();
   final FocusNode _logoutAccountFocusNode = FocusNode();
   late final Map<HomeSection, FocusNode> _sidebarFocusNodes;
@@ -51,6 +53,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<String> _favorites = {};
   DateTime? _lastHomeBackPress;
   bool _sidebarExpanded = true;
+  bool _adultContentBlocked = false;
 
   @override
   void initState() {
@@ -66,6 +69,8 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _searchFocusNode.removeListener(_handleSearchFocusChange);
     _homeKeyboardFocusNode.dispose();
+    _parentalToggleFocusNode.dispose();
+    _changeParentalPinFocusNode.dispose();
     _changeServerFocusNode.dispose();
     _logoutAccountFocusNode.dispose();
     for (final node in _sidebarFocusNodes.values) {
@@ -96,6 +101,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final server = await ApiService.getActiveServer();
       final savedFavorites = prefs.getStringList('favorites') ?? [];
       final continueWatching = await ApiService.getContinueWatchingItems();
+      final adultContentBlocked = await ApiService.isAdultContentBlocked();
       final serverName = server?.name ??
           prefs.getString('selected_server_name') ??
           'Servidor Desconhecido';
@@ -120,13 +126,14 @@ class _HomeScreenState extends State<HomeScreen> {
         _movieCatalog = catalogs[1];
         _seriesCatalog = catalogs[2];
         _continueWatchingItems = continueWatching;
+        _adultContentBlocked = adultContentBlocked;
         _favorites
           ..clear()
           ..addAll(savedFavorites);
-        _selectedItem = _liveCatalog.items.isNotEmpty
-            ? _liveCatalog.items.first
-            : _movieCatalog.items.isNotEmpty
-                ? _movieCatalog.items.first
+        _selectedItem = _visibleLiveCatalog.items.isNotEmpty
+            ? _visibleLiveCatalog.items.first
+            : _visibleMovieCatalog.items.isNotEmpty
+                ? _visibleMovieCatalog.items.first
                 : _seriesCatalog.items.isNotEmpty
                     ? _seriesCatalog.items.first
                     : null;
@@ -334,15 +341,15 @@ class _HomeScreenState extends State<HomeScreen> {
   IptvCatalog get _activeCatalog {
     switch (_activeSection) {
       case HomeSection.live:
-        return _liveCatalog;
+        return _visibleLiveCatalog;
       case HomeSection.movies:
-        return _movieCatalog;
+        return _visibleMovieCatalog;
       case HomeSection.series:
         return _seriesCatalog;
       case HomeSection.favorites:
         final items = [
-          ..._liveCatalog.items,
-          ..._movieCatalog.items,
+          ..._visibleLiveCatalog.items,
+          ..._visibleMovieCatalog.items,
           ..._seriesCatalog.items,
         ].where((item) => _favorites.contains(item.id)).toList();
         return IptvCatalog(
@@ -351,8 +358,28 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       case HomeSection.home:
       case HomeSection.settings:
-        return _liveCatalog;
+        return _visibleLiveCatalog;
     }
+  }
+
+  IptvCatalog get _visibleLiveCatalog {
+    return _adultContentBlocked
+        ? _withoutAdultCategories(_liveCatalog)
+        : _liveCatalog;
+  }
+
+  IptvCatalog get _visibleMovieCatalog {
+    return _adultContentBlocked
+        ? _withoutAdultCategories(_movieCatalog)
+        : _movieCatalog;
+  }
+
+  IptvCatalog _withoutAdultCategories(IptvCatalog catalog) {
+    return IptvCatalog(
+      categories:
+          catalog.categories.where((item) => !_isAdultCategory(item)).toList(),
+      items: catalog.items.where((item) => !_isAdultContent(item)).toList(),
+    );
   }
 
   List<IptvContentItem> get _filteredItems {
@@ -420,7 +447,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _focusSettingsFirstAction() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        _changeServerFocusNode.requestFocus();
+        _parentalToggleFocusNode.requestFocus();
       }
     });
   }
@@ -534,18 +561,42 @@ class _HomeScreenState extends State<HomeScreen> {
         normalized.contains('jogos do dia');
   }
 
+  bool _isAdultCategory(CategoryOption category) {
+    return _normalizedSearch('${category.id} ${category.label}')
+        .contains('xxx');
+  }
+
+  bool _isAdultContent(IptvContentItem item) {
+    return _normalizedSearch('${item.categoryId} ${item.category}')
+        .contains('xxx');
+  }
+
   List<IptvContentItem> get _gamesOfTheDayItems {
-    return _liveCatalog.items
+    return _visibleLiveCatalog.items
         .where((item) => _isGamesOfTheDayCategory(item.category))
         .toList();
   }
 
   List<IptvContentItem> get _favoriteHomeItems {
     return [
-      ..._liveCatalog.items,
-      ..._movieCatalog.items,
+      ..._visibleLiveCatalog.items,
+      ..._visibleMovieCatalog.items,
       ..._seriesCatalog.items,
     ].where((item) => _favorites.contains(item.id)).toList();
+  }
+
+  List<ContinueWatchingItem> get _visibleContinueWatchingItems {
+    if (!_adultContentBlocked) {
+      return _continueWatchingItems;
+    }
+
+    return _continueWatchingItems.where((progressItem) {
+      final item = progressItem.item;
+      if (item.type != 'live' && item.type != 'movie') {
+        return true;
+      }
+      return !_isAdultContent(item);
+    }).toList();
   }
 
   bool _isFavorite(IptvContentItem item) {
@@ -603,6 +654,262 @@ class _HomeScreenState extends State<HomeScreen> {
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
+  Future<String?> _showPinDialog({
+    required String title,
+    required String hint,
+    String? message,
+  }) async {
+    String pin = '';
+    String? errorText;
+
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void submit() {
+              if (!RegExp(r'^\d{4}$').hasMatch(pin)) {
+                setDialogState(() {
+                  errorText = 'Digite uma senha de 4 digitos.';
+                });
+                return;
+              }
+              Navigator.of(context).pop(pin);
+            }
+
+            void addDigit(String digit) {
+              if (pin.length >= 4) {
+                return;
+              }
+              setDialogState(() {
+                pin += digit;
+                errorText = null;
+              });
+              if (pin.length == 4) {
+                submit();
+              }
+            }
+
+            void removeDigit() {
+              if (pin.isEmpty) {
+                return;
+              }
+              setDialogState(() {
+                pin = pin.substring(0, pin.length - 1);
+                errorText = null;
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF101216),
+              title: Text(title),
+              content: SizedBox(
+                width: 360,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (message != null) ...[
+                      Text(
+                        message,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    Container(
+                      height: 54,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF171820),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Text(
+                        pin.isEmpty
+                            ? hint
+                            : List.filled(pin.length, '*').join(),
+                        style: TextStyle(
+                          color: pin.isEmpty ? Colors.white38 : Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: pin.isEmpty ? 0 : 8,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    GridView.count(
+                      crossAxisCount: 3,
+                      shrinkWrap: true,
+                      mainAxisSpacing: 8,
+                      crossAxisSpacing: 8,
+                      childAspectRatio: 2.4,
+                      children: [
+                        for (final digit in [
+                          '1',
+                          '2',
+                          '3',
+                          '4',
+                          '5',
+                          '6',
+                          '7',
+                          '8',
+                          '9',
+                        ])
+                          _PinKeyButton(
+                            label: digit,
+                            autofocus: digit == '1',
+                            onPressed: () => addDigit(digit),
+                          ),
+                        _PinKeyButton(
+                          icon: Icons.backspace_outlined,
+                          onPressed: removeDigit,
+                        ),
+                        _PinKeyButton(
+                          label: '0',
+                          onPressed: () => addDigit('0'),
+                        ),
+                        _PinKeyButton(
+                          icon: Icons.check_rounded,
+                          onPressed: submit,
+                        ),
+                      ],
+                    ),
+                    if (errorText != null) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        errorText!,
+                        style: const TextStyle(
+                          color: Colors.redAccent,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancelar'),
+                ),
+                TextButton(
+                  autofocus: true,
+                  onPressed: submit,
+                  child: const Text('OK'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<bool> _confirmParentalPin(String action) async {
+    final pin = await _showPinDialog(
+      title: 'Controle parental',
+      hint: 'Senha de 4 digitos',
+      message: action,
+    );
+    if (pin == null) {
+      return false;
+    }
+
+    final valid = await ApiService.validateParentalPin(pin);
+    if (!mounted) {
+      return false;
+    }
+    if (!valid) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Senha do controle parental incorreta.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+    return valid;
+  }
+
+  Future<void> _toggleAdultContentBlock() async {
+    final nextBlocked = !_adultContentBlocked;
+    final valid = await _confirmParentalPin(
+      nextBlocked
+          ? 'Digite a senha para bloquear categorias XXX.'
+          : 'Digite a senha para liberar categorias XXX.',
+    );
+    if (!valid || !mounted) {
+      return;
+    }
+
+    await ApiService.setAdultContentBlocked(nextBlocked);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _adultContentBlocked = nextBlocked;
+      final catalog = _activeCatalog;
+      _selectedItem = catalog.items.isNotEmpty ? catalog.items.first : null;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          nextBlocked
+              ? 'Categorias XXX bloqueadas.'
+              : 'Categorias XXX liberadas.',
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _changeParentalPin() async {
+    final valid = await _confirmParentalPin(
+      'Digite a senha atual. A senha inicial e 1234.',
+    );
+    if (!valid || !mounted) {
+      return;
+    }
+
+    final newPin = await _showPinDialog(
+      title: 'Nova senha',
+      hint: 'Nova senha de 4 digitos',
+    );
+    if (newPin == null || !mounted) {
+      return;
+    }
+
+    final confirmationPin = await _showPinDialog(
+      title: 'Confirmar senha',
+      hint: 'Repita a senha',
+    );
+    if (confirmationPin == null || !mounted) {
+      return;
+    }
+
+    if (newPin != confirmationPin) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('As senhas digitadas nao conferem.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    await ApiService.changeParentalPin(newPin);
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Senha do controle parental alterada.'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
   Future<void> _playItem(IptvContentItem item) async {
     try {
       if (item.type == 'series') {
@@ -636,7 +943,7 @@ class _HomeScreenState extends State<HomeScreen> {
           'contentType': item.type,
           'contentId': ApiService.playbackContentId(item),
           'favoriteId': item.id,
-          if (item.type == 'live') 'liveChannels': _liveCatalog.items,
+          if (item.type == 'live') 'liveChannels': _visibleLiveCatalog.items,
           'resumePositionMs': resumePosition?.inMilliseconds ?? 0,
         },
       );
@@ -977,8 +1284,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildHomeDashboard() {
     final gamesOfTheDay = _gamesOfTheDayItems;
     final favoriteItems = _favoriteHomeItems;
-    final livePreview = _liveCatalog.items.take(8).toList();
-    final moviesPreview = _movieCatalog.items.take(10).toList();
+    final continueWatchingItems = _visibleContinueWatchingItems;
+    final livePreview = _visibleLiveCatalog.items.take(8).toList();
+    final moviesPreview = _visibleMovieCatalog.items.take(10).toList();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
@@ -988,9 +1296,9 @@ class _HomeScreenState extends State<HomeScreen> {
           if (gamesOfTheDay.isNotEmpty) ...[
             _buildGamesOfTheDaySection(gamesOfTheDay),
           ],
-          if (_continueWatchingItems.isNotEmpty) ...[
+          if (continueWatchingItems.isNotEmpty) ...[
             const SizedBox(height: 22),
-            _buildContinueWatchingSection(),
+            _buildContinueWatchingSection(continueWatchingItems),
           ],
           if (favoriteItems.isNotEmpty) ...[
             const SizedBox(height: 22),
@@ -1054,8 +1362,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildContinueWatchingSection() {
-    final items = _continueWatchingItems.take(12).toList();
+  Widget _buildContinueWatchingSection(List<ContinueWatchingItem> items) {
+    final visibleItems = items.take(12).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1078,11 +1386,11 @@ class _HomeScreenState extends State<HomeScreen> {
               height: 176,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
-                itemCount: items.length,
+                itemCount: visibleItems.length,
                 separatorBuilder: (_, __) => const SizedBox(width: gap),
                 itemBuilder: (context, index) {
                   return _buildContinueWatchingCard(
-                    items[index],
+                    visibleItems[index],
                     width: cardWidth,
                     moveLeftToSidebar: index == 0,
                   );
@@ -1970,8 +2278,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildSettings() {
-    return Padding(
-      padding: const EdgeInsets.all(28),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(28, 28, 28, 36),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1990,12 +2298,36 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
           _buildInlineError('Servidor ativo: $_serverName'),
           const SizedBox(height: 14),
+          _buildInlineError(
+            _adultContentBlocked
+                ? 'Controle parental: categorias XXX bloqueadas.'
+                : 'Controle parental: categorias XXX liberadas.',
+          ),
+          const SizedBox(height: 14),
+          _buildFocusButton(
+            icon: _adultContentBlocked
+                ? Icons.lock_rounded
+                : Icons.lock_open_rounded,
+            label: _adultContentBlocked
+                ? 'Liberar Conteudo Adulto'
+                : 'Bloquear Conteudo Adulto',
+            onPressed: _toggleAdultContentBlock,
+            focusNode: _parentalToggleFocusNode,
+            moveLeftToSidebar: true,
+          ),
+          const SizedBox(height: 12),
+          _buildFocusButton(
+            icon: Icons.pin_rounded,
+            label: 'Alterar Senha Parental',
+            onPressed: _changeParentalPin,
+            focusNode: _changeParentalPinFocusNode,
+          ),
+          const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.dns_rounded,
             label: 'Trocar Servidor',
             onPressed: _handleChangeServer,
             focusNode: _changeServerFocusNode,
-            moveLeftToSidebar: true,
           ),
           const SizedBox(height: 12),
           _buildFocusButton(
@@ -2159,4 +2491,43 @@ class _HeaderText extends TextStyle {
           fontSize: 10,
           fontWeight: FontWeight.w900,
         );
+}
+
+class _PinKeyButton extends StatelessWidget {
+  final String? label;
+  final IconData? icon;
+  final bool autofocus;
+  final VoidCallback onPressed;
+
+  const _PinKeyButton({
+    this.label,
+    this.icon,
+    this.autofocus = false,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      autofocus: autofocus,
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        backgroundColor: const Color(0xFF171820),
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: const BorderSide(color: Colors.white10),
+        ),
+      ),
+      child: icon == null
+          ? Text(
+              label ?? '',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            )
+          : Icon(icon, size: 20),
+    );
+  }
 }

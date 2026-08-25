@@ -139,6 +139,9 @@ class IptvSeriesDetails {
 
 class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
+  static const String _parentalPinKey = 'parental_control_pin';
+  static const String _adultContentBlockedKey = 'adult_content_blocked';
+  static const String _defaultParentalPin = '1234';
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -619,6 +622,27 @@ class ApiService {
     final token = prefs.getString('auth_token') ?? '';
     final servers = prefs.getString('servers_data') ?? '';
     return token.isNotEmpty || servers.isNotEmpty;
+  }
+
+  static Future<bool> isAdultContentBlocked() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_adultContentBlockedKey) ?? false;
+  }
+
+  static Future<void> setAdultContentBlocked(bool blocked) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_adultContentBlockedKey, blocked);
+  }
+
+  static Future<bool> validateParentalPin(String pin) async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedPin = prefs.getString(_parentalPinKey) ?? _defaultParentalPin;
+    return pin == savedPin;
+  }
+
+  static Future<void> changeParentalPin(String pin) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_parentalPinKey, pin);
   }
 
   static String playbackContentId(IptvContentItem item) {
