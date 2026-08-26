@@ -1,0 +1,7 @@
+flutter devices
+
+flutter run -d emulator-5554 
+
+flutter build apk --release
+
+

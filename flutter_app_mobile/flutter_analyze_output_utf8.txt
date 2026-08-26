@@ -1,0 +1,52 @@
+﻿Analyzing flutter_app...                                        
+
+   info - Unnecessary 'const' keyword. Try removing the keyword - lib\api_service.dart:7:33 - unnecessary_const
+   info - Constructors for public widgets should have a named 'key' parameter. Try adding a named parameter to the constructor - lib\home_screen.dart:5:7 - use_key_in_widget_constructors
+   info - Invalid use of a private type in a public API. Try making the private type public, or making the API that uses the private type also be private - lib\home_screen.dart:7:3 - library_private_types_in_public_api
+   info - Don't use 'BuildContext's across async gaps. Try rewriting the code to not use the 'BuildContext', or guard the use with a 'mounted' check - lib\home_screen.dart:93:18 - use_build_context_synchronously
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:118:31 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:120:29 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:120:43 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:134:32 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:171:32 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:199:43 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:201:41 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:202:45 - prefer_const_constructors
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\home_screen.dart:333:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\home_screen.dart:344:39 - deprecated_member_use
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\home_screen.dart:348:20 - prefer_const_constructors
+  error - The method '_buildHorizontalCard' isn't defined for the type '_HomeScreenState'. Try correcting the name to the name of an existing method, or defining a method named '_buildHorizontalCard' - lib\home_screen.dart:376:15 - undefined_method
+  error - The method '_buildHorizontalCard' isn't defined for the type '_HomeScreenState'. Try correcting the name to the name of an existing method, or defining a method named '_buildHorizontalCard' - lib\home_screen.dart:377:15 - undefined_method
+  error - The method '_buildHorizontalCard' isn't defined for the type '_HomeScreenState'. Try correcting the name to the name of an existing method, or defining a method named '_buildHorizontalCard' - lib\home_screen.dart:378:15 - undefined_method
+  error - 2 positional arguments expected by '_buildMediaCard', but 1 found. Try adding the missing arguments - lib\home_screen.dart:409:44 - not_enough_positional_arguments
+  error - 2 positional arguments expected by '_buildMediaCard', but 1 found. Try adding the missing arguments - lib\home_screen.dart:410:48 - not_enough_positional_arguments
+  error - 2 positional arguments expected by '_buildMediaCard', but 1 found. Try adding the missing arguments - lib\home_screen.dart:411:42 - not_enough_positional_arguments
+  error - 2 positional arguments expected by '_buildMediaCard', but 1 found. Try adding the missing arguments - lib\home_screen.dart:412:41 - not_enough_positional_arguments
+  error - The method '_buildHorizontalCard' isn't defined for the type '_HomeScreenState'. Try correcting the name to the name of an existing method, or defining a method named '_buildHorizontalCard' - lib\home_screen.dart:446:22 - undefined_method
+warning - The declaration '_handleCardTap' isn't referenced. Try removing the declaration of '_handleCardTap' - lib\home_screen.dart:628:8 - unused_element
+   info - Constructors for public widgets should have a named 'key' parameter. Try adding a named parameter to the constructor - lib\initial_screen.dart:6:7 - use_key_in_widget_constructors
+   info - Invalid use of a private type in a public API. Try making the private type public, or making the API that uses the private type also be private - lib\initial_screen.dart:8:3 - library_private_types_in_public_api
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\initial_screen.dart:74:45 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\initial_screen.dart:91:45 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\initial_screen.dart:112:45 - deprecated_member_use
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\initial_screen.dart:124:27 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\initial_screen.dart:125:36 - prefer_const_constructors
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\initial_screen.dart:165:63 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\initial_screen.dart:349:41 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\initial_screen.dart:357:28 - deprecated_member_use
+   info - Invalid use of a private type in a public API. Try making the private type public, or making the API that uses the private type also be private - lib\login_screen.dart:12:3 - library_private_types_in_public_api
+   info - Don't use 'BuildContext's across async gaps. Try rewriting the code to not use the 'BuildContext', or guard the use with a 'mounted' check - lib\login_screen.dart:87:22 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps. Try rewriting the code to not use the 'BuildContext', or guard the use with a 'mounted' check - lib\login_screen.dart:89:22 - use_build_context_synchronously
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\login_screen.dart:128:45 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\login_screen.dart:145:45 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss. Try replacing the use of the deprecated member with the replacement - lib\login_screen.dart:287:35 - deprecated_member_use
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\login_screen.dart:390:21 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\login_screen.dart:394:21 - prefer_const_constructors
+   info - 'VideoPlayerController.network' is deprecated and shouldn't be used. Use VideoPlayerController.networkUrl instead. Try replacing the use of the deprecated member with the replacement - lib\player_screen.dart:29:19 - deprecated_member_use
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\player_screen.dart:63:27 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\player_screen.dart:65:25 - prefer_const_constructors
+   info - Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to the constructor invocation - lib\player_screen.dart:65:40 - prefer_const_constructors
+   info - Don't use 'BuildContext's across async gaps. Try rewriting the code to not use the 'BuildContext', or guard the use with a 'mounted' check - lib\server_selection_screen.dart:16:18 - use_build_context_synchronously
+   info - 'MaterialStateProperty' is deprecated and shouldn't be used. Use WidgetStateProperty instead. Moved to the Widgets layer to make code available outside of Material. This feature was deprecated after v3.19.0-0.3.pre. Try replacing the use of the deprecated member with the replacement - lib\server_selection_screen.dart:68:33 - deprecated_member_use
+   info - 'MaterialState' is deprecated and shouldn't be used. Use WidgetState instead. Moved to the Widgets layer to make code available outside of Material. This feature was deprecated after v3.19.0-0.3.pre. Try replacing the use of the deprecated member with the replacement - lib\server_selection_screen.dart:70:54 - deprecated_member_use
+
