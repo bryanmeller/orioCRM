@@ -70,6 +70,7 @@ class IptvContentItem {
   final String? year;
   final String description;
   final DateTime? eventStartDateTime;
+  final bool liveEpgChecked;
 
   const IptvContentItem({
     required this.id,
@@ -86,6 +87,7 @@ class IptvContentItem {
     this.year,
     this.description = '',
     this.eventStartDateTime,
+    this.liveEpgChecked = false,
   });
 }
 
@@ -136,6 +138,18 @@ class IptvSeriesDetails {
     required this.series,
     required this.plot,
     required this.seasons,
+  });
+}
+
+class _LiveProgram {
+  final String title;
+  final DateTime? start;
+  final DateTime? end;
+
+  const _LiveProgram({
+    required this.title,
+    required this.start,
+    required this.end,
   });
 }
 
@@ -364,6 +378,16 @@ class ApiService {
     }).toList();
 
     return IptvCatalog(categories: categories, items: items);
+  }
+
+  static Future<List<IptvContentItem>> fetchLiveEpgItems(
+    List<IptvContentItem> items,
+  ) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+    final server = await _requireActiveServer();
+    return _attachLiveEpg(server, items);
   }
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
@@ -629,7 +653,7 @@ class ApiService {
 
   static Future<bool> isAdultContentBlocked() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_adultContentBlockedKey) ?? false;
+    return prefs.getBool(_adultContentBlockedKey) ?? true;
   }
 
   static Future<void> setAdultContentBlocked(bool blocked) async {
@@ -883,8 +907,28 @@ class ApiService {
 
   static Future<List<Map<String, dynamic>>> _fetchLiveProxy(
     IptvServer server,
-    String action,
-  ) async {
+    String action, {
+    String streamId = '',
+  }) async {
+    final data = await _fetchLiveProxyData(
+      server,
+      action,
+      streamId: streamId,
+    );
+    if (data is! List) {
+      return [];
+    }
+    return data
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  static Future<dynamic> _fetchLiveProxyData(
+    IptvServer server,
+    String action, {
+    String streamId = '',
+  }) async {
     final response = await http
         .post(
           Uri.parse('$baseUrl/lynx/xtream/live'),
@@ -894,6 +938,7 @@ class ApiService {
             'username': server.username,
             'password': server.password,
             'action': action,
+            if (streamId.isNotEmpty) 'streamId': streamId,
           }),
         )
         .timeout(_requestTimeout);
@@ -906,13 +951,7 @@ class ApiService {
     }
 
     final data = decoded['data'];
-    if (data is! List) {
-      return [];
-    }
-    return data
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
+    return data;
   }
 
   static Future<List<Map<String, dynamic>>> _fetchXtream(
@@ -944,6 +983,289 @@ class ApiService {
         .toList();
   }
 
+  static Future<List<IptvContentItem>> _attachLiveEpg(
+    IptvServer server,
+    List<IptvContentItem> items,
+  ) async {
+    const batchSize = 10;
+    final result = List<IptvContentItem>.from(items);
+
+    for (var start = 0; start < result.length; start += batchSize) {
+      final end = (start + batchSize).clamp(0, result.length);
+      final updates = await Future.wait(
+        [
+          for (var index = start; index < end; index++)
+            _itemWithShortEpg(server, result[index]),
+        ],
+      );
+      for (var offset = 0; offset < updates.length; offset++) {
+        result[start + offset] = updates[offset];
+      }
+    }
+
+    return result;
+  }
+
+  static Future<IptvContentItem> _itemWithShortEpg(
+    IptvServer server,
+    IptvContentItem item,
+  ) async {
+    final programs = await _fetchShortEpg(server, item.id);
+    if (programs.isEmpty) {
+      final currentLabel = item.subtitle == 'Buscando EPG...'
+          ? 'EPG indisponivel'
+          : item.subtitle;
+      final nextLabel = item.nextShowing == 'Aguardando EPG...'
+          ? 'Sem dados do EPG'
+          : item.nextShowing;
+      return IptvContentItem(
+        id: item.id,
+        title: item.title,
+        subtitle: currentLabel,
+        category: item.category,
+        categoryId: item.categoryId,
+        streamUrl: item.streamUrl,
+        alternateStreamUrls: item.alternateStreamUrls,
+        imageUrl: item.imageUrl,
+        type: item.type,
+        nextShowing: nextLabel,
+        rating: item.rating,
+        year: item.year,
+        description: item.description,
+        eventStartDateTime: item.eventStartDateTime,
+        liveEpgChecked: true,
+      );
+    }
+
+    final now = DateTime.now();
+    final currentIndex = programs.indexWhere((program) {
+      final start = program.start;
+      final end = program.end;
+      if (start == null || end == null) {
+        return false;
+      }
+      return !now.isBefore(start) && now.isBefore(end);
+    });
+
+    final current = currentIndex >= 0
+        ? programs[currentIndex]
+        : programs.where((program) {
+            final start = program.start;
+            final end = program.end;
+            return start != null &&
+                end == null &&
+                !now.isBefore(start) &&
+                now.difference(start) < const Duration(hours: 6);
+          }).firstOrNull;
+
+    final next = currentIndex >= 0
+        ? programs.skip(currentIndex + 1).firstOrNull
+        : programs.where((program) {
+            final start = program.start;
+            return start != null && start.isAfter(now);
+          }).firstOrNull;
+
+    final subtitle = current != null
+        ? _formatProgramLabel(current)
+        : _formatProgramNowFromItem(item);
+    final nextShowing = next != null
+        ? _formatProgramLabel(next)
+        : _formatProgramNextFromItem(item);
+
+    return IptvContentItem(
+      id: item.id,
+      title: item.title,
+      subtitle: subtitle,
+      category: item.category,
+      categoryId: item.categoryId,
+      streamUrl: item.streamUrl,
+      alternateStreamUrls: item.alternateStreamUrls,
+      imageUrl: item.imageUrl,
+      type: item.type,
+      nextShowing: nextShowing,
+      rating: item.rating,
+      year: item.year,
+      description: item.description,
+      eventStartDateTime: item.eventStartDateTime,
+      liveEpgChecked: true,
+    );
+  }
+
+  static Future<List<_LiveProgram>> _fetchShortEpg(
+    IptvServer server,
+    String streamId,
+  ) async {
+    if (streamId.isEmpty) {
+      return const [];
+    }
+
+    final proxyPrograms = await _fetchShortEpgProxy(server, streamId);
+    if (proxyPrograms.isNotEmpty) {
+      return proxyPrograms;
+    }
+
+    try {
+      final uri = Uri.parse(
+        '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_short_epg&stream_id=${Uri.encodeQueryComponent(streamId)}&limit=8',
+      );
+      final response = await http.get(
+        uri,
+        headers: const {
+          'Accept': 'application/json, text/plain, */*',
+          'User-Agent': 'IPTVSmartersPro/1.0 (Linux; Android 10)',
+        },
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return const [];
+      }
+
+      return _programsFromEpgData(jsonDecode(response.body));
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<List<_LiveProgram>> _fetchShortEpgProxy(
+    IptvServer server,
+    String streamId,
+  ) async {
+    try {
+      final data = await _fetchLiveProxyData(
+        server,
+        'epg',
+        streamId: streamId,
+      ).timeout(const Duration(seconds: 8));
+      return _programsFromEpgData(data);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static List<_LiveProgram> _programsFromEpgData(dynamic decoded) {
+    final programs = _epgListings(decoded)
+        .map(_liveProgramFromJson)
+        .where((program) => program.title.isNotEmpty)
+        .toList()
+      ..sort((a, b) {
+        final aStart = a.start;
+        final bStart = b.start;
+        if (aStart == null && bStart == null) {
+          return 0;
+        }
+        if (aStart == null) {
+          return 1;
+        }
+        if (bStart == null) {
+          return -1;
+        }
+        return aStart.compareTo(bStart);
+      });
+    return programs;
+  }
+
+  static List<Map<String, dynamic>> _epgListings(dynamic decoded) {
+    dynamic data = decoded;
+    if (decoded is Map) {
+      data = decoded['epg_listings'] ??
+          decoded['listings'] ??
+          decoded['data'] ??
+          decoded['epg'];
+    }
+    if (data is Map) {
+      data = data['epg_listings'] ?? data['listings'] ?? data['data'];
+    }
+    if (data is! List) {
+      return const [];
+    }
+    return data
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
+
+  static _LiveProgram _liveProgramFromJson(Map<String, dynamic> item) {
+    return _LiveProgram(
+      title: _decodeEpgText(
+        item['title'] ??
+            item['name'] ??
+            item['program_title'] ??
+            item['programme_title'],
+      ),
+      start: _programDateTime(item, const [
+        'start_timestamp',
+        'start',
+        'start_time',
+        'startTime',
+      ]),
+      end: _programDateTime(item, const [
+        'stop_timestamp',
+        'end_timestamp',
+        'stop',
+        'end',
+        'end_time',
+        'endTime',
+      ]),
+    );
+  }
+
+  static DateTime? _programDateTime(
+    Map<String, dynamic> item,
+    List<String> keys,
+  ) {
+    for (final key in keys) {
+      final value = _stringValue(item[key]);
+      if (value.isEmpty) {
+        continue;
+      }
+
+      final parsedInt = int.tryParse(value);
+      if (parsedInt != null && parsedInt > 0) {
+        final millis = parsedInt > 9999999999 ? parsedInt : parsedInt * 1000;
+        return DateTime.fromMillisecondsSinceEpoch(millis);
+      }
+
+      final normalized = value.replaceFirst(' ', 'T');
+      final parsed = DateTime.tryParse(normalized);
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  static String _decodeEpgText(dynamic value) {
+    final text = _stringValue(value);
+    if (text.isEmpty) {
+      return '';
+    }
+
+    final compact = text.replaceAll(RegExp(r'\s+'), '');
+    final canBeBase64 = compact.length % 4 == 0 &&
+        RegExp(r'^[A-Za-z0-9+/]+={0,2}$').hasMatch(compact);
+    if (!canBeBase64) {
+      return text;
+    }
+
+    try {
+      final decoded = utf8.decode(base64.decode(compact), allowMalformed: true);
+      return decoded.trim().isNotEmpty ? decoded.trim() : text;
+    } catch (_) {
+      return text;
+    }
+  }
+
+  static String _formatProgramLabel(_LiveProgram program) {
+    final title = program.title.trim();
+    final start = program.start;
+    if (start == null) {
+      return title;
+    }
+    return '${_twoDigits(start.hour)}:${_twoDigits(start.minute)} $title';
+  }
+
+  static String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
   static List<CategoryOption> _mapCategories(List<Map<String, dynamic>> data) {
     return data
         .map((item) {
@@ -974,30 +1296,55 @@ class ApiService {
   }
 
   static String _formatProgramNow(Map<String, dynamic> item) {
+    return _formatProgramNowFromItem(item);
+  }
+
+  static String _formatProgramNowFromItem(dynamic item) {
+    if (item is IptvContentItem) {
+      if (item.type == 'live' && !item.liveEpgChecked) {
+        return 'Buscando EPG...';
+      }
+      return item.subtitle.trim().isNotEmpty
+          ? item.subtitle
+          : 'Programacao indisponivel';
+    }
+    final map = item is Map<String, dynamic> ? item : <String, dynamic>{};
     var value = _stringValue(
-      item['epg_now'] ??
-          item['current_program'] ??
-          item['now_showing'] ??
-          item['epg_channel_id'],
-      fallback: 'Programacao Ao Vivo',
+      map['epg_now'] ?? map['current_program'] ?? map['now_showing'],
+      fallback: 'Buscando EPG...',
     ).replaceFirst(RegExp(r'^EPG:\s*', caseSensitive: false), '');
     if (!RegExp(r'^\d{1,2}:\d{2}').hasMatch(value)) {
-      final time = _stringValue(item['now_start'] ?? item['start_time'],
-          fallback: '13:00');
-      value = '$time $value';
+      final time = _stringValue(map['now_start'] ?? map['start_time']);
+      if (time.isNotEmpty) {
+        value = '$time $value';
+      }
     }
     return value;
   }
 
   static String _formatProgramNext(Map<String, dynamic> item) {
+    return _formatProgramNextFromItem(item);
+  }
+
+  static String _formatProgramNextFromItem(dynamic item) {
+    if (item is IptvContentItem) {
+      if (item.type == 'live' && !item.liveEpgChecked) {
+        return 'Aguardando EPG...';
+      }
+      return (item.nextShowing ?? '').trim().isNotEmpty
+          ? item.nextShowing!
+          : 'Sem proxima programacao';
+    }
+    final map = item is Map<String, dynamic> ? item : <String, dynamic>{};
     var value = _stringValue(
-      item['epg_next'] ?? item['next_program'] ?? item['next_showing'],
-      fallback: 'Programacao Normal',
+      map['epg_next'] ?? map['next_program'] ?? map['next_showing'],
+      fallback: 'Aguardando EPG...',
     ).replaceFirst(RegExp(r'^A seguir:\s*', caseSensitive: false), '');
     if (!RegExp(r'^\d{1,2}:\d{2}').hasMatch(value)) {
-      final time = _stringValue(item['next_start'] ?? item['next_time'],
-          fallback: '14:00');
-      value = '$time $value';
+      final time = _stringValue(map['next_start'] ?? map['next_time']);
+      if (time.isNotEmpty) {
+        value = '$time $value';
+      }
     }
     return value;
   }

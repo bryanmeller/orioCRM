@@ -5,6 +5,8 @@ import android.content.Context
 import android.graphics.Color
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -53,6 +55,19 @@ val bgColor = when (bgColorValue) {
 }
 setBackgroundColor(bgColor)
 
+            val fontSizeValue = creationParams?.get("fontSize")
+            val fontSize = when (fontSizeValue) {
+                is Double -> fontSizeValue.toFloat()
+                is Float -> fontSizeValue
+                is Int -> fontSizeValue.toFloat()
+                is Long -> fontSizeValue.toFloat()
+                else -> 18f
+            }
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize)
+            gravity = Gravity.CENTER_VERTICAL
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
+
 
             // Input type
             inputType = android.text.InputType.TYPE_CLASS_TEXT
@@ -65,6 +80,9 @@ setBackgroundColor(bgColor)
             // Max lines
             val maxLines = creationParams?.get("maxLines") as? Int ?: 1
             setLines(maxLines)
+            if (maxLines == 1) {
+                setSingleLine(true)
+            }
 
             imeOptions = EditorInfo.IME_ACTION_DONE
 

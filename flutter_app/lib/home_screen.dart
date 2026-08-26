@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:android_tv_text_field/native_textfield_tv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -58,12 +60,15 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<String> _favorites = {};
   DateTime? _lastHomeBackPress;
   bool _sidebarExpanded = true;
-  bool _adultContentBlocked = false;
+  bool _adultContentBlocked = true;
   String? _pendingReminderEventId;
   final Set<String> _activeReminderIds = {};
   final Map<String, FocusNode> _gameCardFocusNodes = {};
   final Map<String, FocusNode> _gameReminderFocusNodes = {};
   final Map<String, FocusNode> _categoryFocusNodes = {};
+  int _liveEpgRefreshToken = 0;
+  final Set<String> _liveEpgLoadingIds = {};
+  Timer? _liveEpgFocusTimer;
 
   @override
   void initState() {
@@ -85,6 +90,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _changeServerFocusNode.dispose();
     _logoutAccountFocusNode.dispose();
     _refreshFocusNode.dispose();
+    _liveEpgFocusTimer?.cancel();
     for (final node in _sidebarFocusNodes.values) {
       node.dispose();
     }
@@ -112,6 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadHome() async {
+    _liveEpgRefreshToken++;
     setState(() {
       _loading = true;
       _errorMessage = null;
@@ -165,6 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _loading = false;
       });
       _openPendingReminderIfNeeded();
+      _queueVisibleLiveEpgRefresh();
     } catch (error) {
       if (!mounted) {
         return;
@@ -174,6 +182,78 @@ class _HomeScreenState extends State<HomeScreen> {
         _errorMessage = _friendlyError(error);
       });
     }
+  }
+
+  void _queueVisibleLiveEpgRefresh() {
+    _queueSelectedLiveEpgRefresh();
+  }
+
+  void _queueSelectedLiveEpgRefresh() {
+    final item = _selectedItem;
+    if (_activeSection != HomeSection.live) {
+      return;
+    }
+    if (item == null) {
+      return;
+    }
+    _queueLiveEpgRefreshForItem(item);
+  }
+
+  void _queueLiveEpgRefreshForItem(IptvContentItem item) {
+    _liveEpgFocusTimer?.cancel();
+    _liveEpgFocusTimer = Timer(const Duration(milliseconds: 900), () {
+      if (!mounted || _activeSection != HomeSection.live) {
+        return;
+      }
+      unawaited(_refreshLiveEpgForItem(item));
+    });
+  }
+
+  Future<void> _refreshLiveEpgForItem(IptvContentItem item) async {
+    if (item.type != 'live' ||
+        item.liveEpgChecked ||
+        _liveEpgLoadingIds.contains(item.id)) {
+      return;
+    }
+
+    final token = _liveEpgRefreshToken;
+    _liveEpgLoadingIds.add(item.id);
+    try {
+      final updatedItems = await ApiService.fetchLiveEpgItems([item]);
+      if (!mounted ||
+          token != _liveEpgRefreshToken ||
+          _activeSection != HomeSection.live ||
+          updatedItems.isEmpty) {
+        return;
+      }
+
+      _replaceLiveCatalogItem(updatedItems.first);
+    } catch (_) {
+      return;
+    } finally {
+      _liveEpgLoadingIds.remove(item.id);
+    }
+  }
+
+  void _replaceLiveCatalogItem(IptvContentItem updatedItem) {
+    IptvContentItem? selectedItem;
+    setState(() {
+      final updatedItems = _liveCatalog.items.map((item) {
+        final updated = item.id == updatedItem.id ? updatedItem : item;
+        if (_selectedItem?.id == updated.id) {
+          selectedItem = updated;
+        }
+        return updated;
+      }).toList();
+
+      _liveCatalog = IptvCatalog(
+        categories: _liveCatalog.categories,
+        items: updatedItems,
+      );
+      if (selectedItem != null) {
+        _selectedItem = selectedItem;
+      }
+    });
   }
 
   void _openPendingReminderIfNeeded() {
@@ -329,6 +409,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _serverName = selectedServer.name;
       _errorMessage = null;
+      _liveEpgRefreshToken++;
       _selectedCategory = 'todos';
       _selectedItem = null;
       _liveCatalog = const IptvCatalog(categories: [], items: []);
@@ -471,6 +552,13 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     _focusFirstSelectedSectionItem(section);
+    if (section == HomeSection.live) {
+      _queueVisibleLiveEpgRefresh();
+    } else {
+      _liveEpgRefreshToken++;
+      _liveEpgLoadingIds.clear();
+      _liveEpgFocusTimer?.cancel();
+    }
   }
 
   void _expandSidebar() {
@@ -665,6 +753,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final filteredItems = _filteredItems;
       _selectedItem = filteredItems.isNotEmpty ? filteredItems.first : null;
     });
+    _queueVisibleLiveEpgRefresh();
   }
 
   void _applySearch(String value) {
@@ -673,6 +762,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final items = _filteredItems;
       _selectedItem = items.isNotEmpty ? items.first : null;
     });
+    _queueVisibleLiveEpgRefresh();
   }
 
   void _clearSearch() {
@@ -1123,6 +1213,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _playItem(IptvContentItem item) async {
     try {
+      _liveEpgRefreshToken++;
+      _liveEpgLoadingIds.clear();
+      _liveEpgFocusTimer?.cancel();
       if (item.type == 'series') {
         Navigator.of(context).pushNamed('/series', arguments: item);
         return;
@@ -1401,8 +1494,8 @@ class _HomeScreenState extends State<HomeScreen> {
         _activeSection == HomeSection.favorites;
 
     return Container(
-      height: 86,
-      padding: const EdgeInsets.symmetric(horizontal: 28),
+      height: 70,
+      padding: const EdgeInsets.symmetric(horizontal: 22),
       decoration: const BoxDecoration(
         color: Color(0xFF08090D),
         border: Border(bottom: BorderSide(color: Colors.white10)),
@@ -1428,7 +1521,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   'Servidor: $_serverName',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ],
             ),
@@ -1449,8 +1542,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 },
                 builder: (context, focused) => AnimatedContainer(
                   duration: const Duration(milliseconds: 120),
-                  width: 48,
-                  height: 48,
+                  width: 42,
+                  height: 42,
                   decoration: tvFocusDecoration(
                     focused: focused,
                     baseColor: const Color(0xFF101216),
@@ -1464,6 +1557,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 icon: Icons.exit_to_app,
                 label: 'Sair',
                 onPressed: _confirmExitApp,
+                compact: true,
               ),
             ],
           ),
@@ -1482,7 +1576,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     return Padding(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
       child: Column(
         children: [
           _buildCategoryRail(_activeCatalog.categories),
@@ -1990,6 +2084,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     if (focused) {
                       _collapseSidebar();
                       setState(() => _selectedItem = item);
+                      _queueLiveEpgRefreshForItem(item);
                     }
                   },
                   builder: (context, bellFocused) => AnimatedContainer(
@@ -2120,15 +2215,17 @@ class _HomeScreenState extends State<HomeScreen> {
       canRequestFocus: false,
       onKeyEvent: _leftToSidebarKeyHandler(true),
       child: SizedBox(
-        height: compact ? 48 : 52,
+        height: compact ? 42 : 52,
         child: AndroidTVTextField(
           key: ValueKey('search-${_activeSection.name}'),
           focusNode: _searchFocusNode,
           controller: _searchController,
-          height: compact ? 48 : 52,
+          height: compact ? 42 : 52,
           hint: 'Pesquisar $sectionName',
           backgroundColor: const Color(0xFF101216),
           textColor: Colors.white,
+          fontSize: compact ? 14 : 18,
+          verticalPadding: compact ? 0 : 5,
           focuesedBorderColor: const Color(0xFFB47CFF),
           unFocuesedBorderColor: Colors.white10,
           onSubmitted: _applySearch,
@@ -2185,7 +2282,7 @@ class _HomeScreenState extends State<HomeScreen> {
             maxCrossAxisExtent: maxCrossAxisExtent,
             mainAxisSpacing: 12,
             crossAxisSpacing: crossAxisSpacing,
-            childAspectRatio: 0.78,
+            childAspectRatio: 0.66,
           ),
           itemCount: items.length,
           itemBuilder: (context, index) => _buildPosterCard(
@@ -2420,6 +2517,10 @@ class _HomeScreenState extends State<HomeScreen> {
     IptvContentItem item, {
     bool moveLeftToSidebar = false,
   }) {
+    final showCategoryBadge = !((_activeSection == HomeSection.movies ||
+            _activeSection == HomeSection.series) &&
+        _selectedCategory != 'todos');
+
     return TvFocusable(
       onKeyEvent: _leftToSidebarKeyHandler(moveLeftToSidebar),
       onPressed: () => _playItem(item),
@@ -2446,11 +2547,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 fit: StackFit.expand,
                 children: [
                   _buildImage(item.imageUrl),
-                  Positioned(
-                    top: 8,
-                    left: 8,
-                    child: _buildBadge(item.category),
-                  ),
+                  if (showCategoryBadge)
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: _buildBadge(item.category),
+                    ),
                   if (_isFavorite(item))
                     const Positioned(
                       top: 8,
@@ -2464,29 +2566,26 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
+            SizedBox(
+              height: 42,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    item.subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white54, fontSize: 11),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ],
@@ -2687,6 +2786,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required VoidCallback onPressed,
     bool moveLeftToSidebar = false,
     FocusNode? focusNode,
+    bool compact = false,
   }) {
     return TvFocusable(
       focusNode: focusNode,
@@ -2699,7 +2799,10 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       builder: (context, focused) => AnimatedContainer(
         duration: const Duration(milliseconds: 120),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 16 : 18,
+          vertical: compact ? 11 : 14,
+        ),
         decoration: tvFocusDecoration(
           focused: focused,
           baseColor: focused ? Colors.white : const Color(0xFF6A00FF),
@@ -2720,6 +2823,7 @@ class _HomeScreenState extends State<HomeScreen> {
               style: TextStyle(
                 color: focused ? const Color(0xFF6A00FF) : Colors.white,
                 fontWeight: FontWeight.bold,
+                fontSize: compact ? 13 : null,
               ),
             ),
           ],

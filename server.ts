@@ -2292,7 +2292,7 @@ async function startServer() {
   // POST /api/lynx/xtream/live
   app.post("/api/lynx/xtream/live", async (req, res) => {
     try {
-      const { baseUrl, username, password, action, categoryId } =
+      const { baseUrl, username, password, action, categoryId, streamId } =
         req.body || {};
       if (!baseUrl || !username || !password || !action) {
         return res
@@ -2322,6 +2322,14 @@ async function startServer() {
         if (categoryId) {
           apiUrl += `&category_id=${encodeURIComponent(categoryId)}`;
         }
+      } else if (action === "epg") {
+        if (!streamId) {
+          return res.status(400).json({
+            success: false,
+            error: "Parametro obrigatorio ausente (streamId).",
+          });
+        }
+        apiUrl += `&action=get_short_epg&stream_id=${encodeURIComponent(streamId)}&limit=8`;
       } else {
         return res
           .status(400)

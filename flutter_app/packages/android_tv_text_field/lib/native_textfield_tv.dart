@@ -50,6 +50,7 @@ class NativeTextField extends StatefulWidget {
   final int? maxLines;
   final Color backgroundColor;
   final Color textColor;
+  final double fontSize;
 
   const NativeTextField({
     super.key,
@@ -67,6 +68,7 @@ class NativeTextField extends StatefulWidget {
     this.maxLines = 1,
     this.backgroundColor = Colors.black,
     this.textColor = Colors.white,
+    this.fontSize = 18,
   });
 
   @override
@@ -187,6 +189,7 @@ class _NativeTextFieldState extends State<NativeTextField> {
       'maxLines': widget.maxLines,
       'backgroundColor': widget.backgroundColor.value,
       'textColor': widget.textColor.value,
+      'fontSize': widget.fontSize,
     };
 
     Widget child = AndroidView(
@@ -229,6 +232,8 @@ class AndroidTVTextField extends StatefulWidget {
   final Color textColor;
   final Color focuesedBorderColor;
   final Color unFocuesedBorderColor;
+  final double fontSize;
+  final double verticalPadding;
 
   final bool showPasswordToggle;
   final ValueChanged<String>? onSubmitted;
@@ -245,6 +250,8 @@ class AndroidTVTextField extends StatefulWidget {
       this.showPasswordToggle = false,
       this.backgroundColor = Colors.black,
       this.textColor = Colors.white,
+      this.fontSize = 18,
+      this.verticalPadding = 5,
       this.onSubmitted,
       this.focuesedBorderColor = const Color(0xFFB47CFF),
       this.unFocuesedBorderColor = Colors.white10,
@@ -352,8 +359,8 @@ class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
               padding: EdgeInsets.only(
                   left: 12,
                   right: widget.postFixWidget == null ? 5 : 50,
-                  top: 5,
-                  bottom: 5),
+                  top: widget.verticalPadding,
+                  bottom: widget.verticalPadding),
               child: NativeTextField(
                 key: _nativeTextFieldKey,
                 controller: widget.controller,
@@ -364,6 +371,7 @@ class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
                 maxLines: widget.maxLines,
                 backgroundColor: widget.backgroundColor,
                 textColor: widget.textColor,
+                fontSize: widget.fontSize,
                 onFocusChanged: (hasFocus) {
                   _nativeFieldFocused = hasFocus;
                 },

@@ -100,11 +100,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
     'Accept': '*/*',
     'Connection': 'keep-alive',
   };
+  static const String _favoritesCategoryId = '__favorites__';
 
   static const List<_RendererMode> _rendererModes = [
     _RendererMode(
       label: 'ExoPlayer TextureView',
       viewType: VideoViewType.textureView,
+    ),
+    _RendererMode(
+      label: 'ExoPlayer PlatformView',
+      viewType: VideoViewType.platformView,
     ),
   ];
 
@@ -247,14 +252,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   List<_LiveCategoryOption> get _liveCategories {
     final channels = _liveChannels;
-    final categories = <_LiveCategoryOption>[];
+    final categories = <_LiveCategoryOption>[
+      const _LiveCategoryOption(
+        id: _favoritesCategoryId,
+        label: 'Favoritos',
+      ),
+    ];
     final seen = <String>{};
     for (final channel in channels) {
-      final id = channel.categoryId.isNotEmpty
-          ? channel.categoryId
-          : channel.category.isNotEmpty
-              ? channel.category
-              : 'geral';
+      final id = _liveChannelCategoryId(channel);
       if (seen.add(id)) {
         categories.add(
           _LiveCategoryOption(
@@ -272,14 +278,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (_selectedLiveCategoryId.isEmpty) {
       return channels;
     }
+    if (_selectedLiveCategoryId == _favoritesCategoryId) {
+      return channels
+          .where((channel) => _favoriteIds.contains(channel.id))
+          .toList();
+    }
     return channels.where((channel) {
-      final id = channel.categoryId.isNotEmpty
-          ? channel.categoryId
-          : channel.category.isNotEmpty
-              ? channel.category
-              : 'geral';
-      return id == _selectedLiveCategoryId;
+      return _liveChannelCategoryId(channel) == _selectedLiveCategoryId;
     }).toList();
+  }
+
+  String _liveChannelCategoryId(IptvContentItem channel) {
+    return channel.categoryId.isNotEmpty
+        ? channel.categoryId
+        : channel.category.isNotEmpty
+            ? channel.category
+            : 'geral';
   }
 
   int _initialLiveChannelIndex() {
@@ -342,12 +356,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
           candidates.length,
           renderer: renderer,
           resumePosition: widget.initialPosition,
+          allowMediaKitFallback: false,
         );
         if (ok) {
           return;
         }
         lastError = _errorMessage;
       }
+
+      final ok = await _tryOpenMediaKitCandidate(
+        candidates[index],
+        index,
+        candidates.length,
+        resumePosition: widget.initialPosition,
+      );
+      if (ok) {
+        return;
+      }
+      lastError = _errorMessage;
     }
 
     if (mounted) {
@@ -371,6 +397,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     int total, {
     _RendererMode? renderer,
     Duration? resumePosition,
+    bool allowMediaKitFallback = true,
   }) async {
     final activeRenderer = renderer ?? _rendererModes.first;
     final uri = Uri.tryParse(url);
@@ -426,6 +453,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       _setLoadingStatus('Iniciando video...');
       await _controller!.play();
+      await _seekVideoPlayerAfterStart(resumePosition);
       final started = await _waitForVideoStart(const Duration(seconds: 12));
       if (started) {
         _markPlaybackStarted();
@@ -447,7 +475,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await _stopActivePlayback();
       }
       if (mounted) {
-        setState(() => _errorMessage = 'Erro ao carregar o video: $error');
+        setState(() {
+          _errorMessage = _isLiveContent
+              ? _playbackFailureMessage(error)
+              : 'Erro ao carregar o video: $error';
+        });
+      }
+      if (!allowMediaKitFallback) {
+        return false;
       }
       if (_isUnsupportedCodecError(error)) {
         return _tryOpenMediaKitCandidate(
@@ -511,7 +546,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       final player = media_kit.Player(
         configuration: const media_kit.PlayerConfiguration(
-          bufferSize: 96 * 1024 * 1024,
+          bufferSize: 192 * 1024 * 1024,
         ),
       );
       final controller = media_kit_video.VideoController(player);
@@ -520,13 +555,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _bindMediaKitStreams(player);
 
       _setLoadingStatus('Conectando ao servidor...');
-      await player.open(
-        media_kit.Media(
-          url,
-          httpHeaders: _mediaKitHeaders,
-        ),
-        play: false,
-      );
+      await player
+          .open(
+            media_kit.Media(
+              url,
+              httpHeaders: _mediaKitHeaders,
+              start: !_isLiveContent &&
+                      resumePosition != null &&
+                      resumePosition > const Duration(seconds: 3)
+                  ? resumePosition
+                  : null,
+            ),
+            play: false,
+          )
+          .timeout(const Duration(seconds: 25));
 
       if (resumePosition != null &&
           resumePosition > const Duration(seconds: 3) &&
@@ -536,8 +578,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       _setLoadingStatus('Iniciando video...');
       await player.play();
-      final started = await _waitForMediaKitStart(const Duration(seconds: 12));
+      final started = await _waitForMediaKitVideoStart(
+        const Duration(seconds: 18),
+      );
       if (started) {
+        await _seekMediaKitAfterStart(player, resumePosition);
         _markPlaybackStarted();
         _startPositionTicker();
         return true;
@@ -545,15 +590,57 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       await _stopActivePlayback();
       if (mounted) {
-        setState(() => _errorMessage = 'O video nao iniciou com MediaKit.');
+        setState(() {
+          _errorMessage = _isLiveContent
+              ? 'O canal abriu sem imagem nesta alternativa.'
+              : 'O video nao iniciou com MediaKit.';
+        });
       }
       return false;
     } catch (error) {
       await _stopActivePlayback();
       if (mounted) {
-        setState(() => _errorMessage = 'Erro ao carregar com MediaKit: $error');
+        setState(() {
+          _errorMessage = _isLiveContent
+              ? _playbackFailureMessage(error)
+              : 'Erro ao carregar com MediaKit: $error';
+        });
       }
       return false;
+    }
+  }
+
+  Future<void> _seekVideoPlayerAfterStart(Duration? resumePosition) async {
+    if (_isLiveContent ||
+        resumePosition == null ||
+        resumePosition <= const Duration(seconds: 3)) {
+      return;
+    }
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+    await controller.seekTo(resumePosition);
+    _lastPosition = resumePosition;
+  }
+
+  Future<void> _seekMediaKitAfterStart(
+    media_kit.Player player,
+    Duration? resumePosition,
+  ) async {
+    if (_isLiveContent ||
+        resumePosition == null ||
+        resumePosition <= const Duration(seconds: 3)) {
+      return;
+    }
+
+    await player.seek(resumePosition);
+    _lastPosition = resumePosition;
+    await Future.delayed(const Duration(milliseconds: 250));
+    final current = player.state.position;
+    if (current < resumePosition - const Duration(seconds: 2)) {
+      await player.seek(resumePosition);
+      _lastPosition = resumePosition;
     }
   }
 
@@ -582,23 +669,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
     _mediaKitErrorSubscription = player.stream.error.listen((error) {
       if (mounted && _hasStartedPlayback) {
-        setState(() => _errorMessage = error);
+        setState(() => _errorMessage = _playbackFailureMessage(error));
       }
     });
   }
 
-  Future<bool> _waitForMediaKitStart(Duration timeout) async {
+  Future<bool> _waitForMediaKitVideoStart(Duration timeout) async {
     final end = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(end)) {
       final player = _mediaKitPlayer;
       if (player == null) {
         return false;
       }
-      final duration = player.state.duration;
-      final position = player.state.position;
-      if (duration > Duration.zero ||
-          position > Duration.zero ||
-          _mediaKitPlaying) {
+      final width = player.state.width ?? 0;
+      final height = player.state.height ?? 0;
+      if (width > 0 && height > 0) {
         return true;
       }
       await Future.delayed(const Duration(milliseconds: 250));
@@ -642,7 +727,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _scheduleStreamRecovery(error);
         return;
       }
-      setState(() => _errorMessage = error);
+      setState(() => _errorMessage = _playbackFailureMessage(error));
       return;
     }
 
@@ -1086,13 +1171,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final activeChannel = activeIndex >= 0 && activeIndex < channels.length
         ? channels[activeIndex]
         : null;
-    final activeCategoryId = activeChannel == null
-        ? ''
-        : activeChannel.categoryId.isNotEmpty
-            ? activeChannel.categoryId
-            : activeChannel.category.isNotEmpty
-                ? activeChannel.category
-                : 'geral';
+    final activeCategoryId =
+        activeChannel == null ? '' : _liveChannelCategoryId(activeChannel);
     final categories = _liveCategories;
     final categoryIndex =
         categories.indexWhere((category) => category.id == activeCategoryId);
@@ -1143,14 +1223,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     final category =
         categories[_focusedLiveCategoryIndex.clamp(0, categories.length - 1)];
-    final channels = _liveChannels.where((channel) {
-      final id = channel.categoryId.isNotEmpty
-          ? channel.categoryId
-          : channel.category.isNotEmpty
-              ? channel.category
-              : 'geral';
-      return id == category.id;
-    }).toList();
+    final channels = category.id == _favoritesCategoryId
+        ? _liveChannels
+            .where((channel) => _favoriteIds.contains(channel.id))
+            .toList()
+        : _liveChannels
+            .where((channel) => _liveChannelCategoryId(channel) == category.id)
+            .toList();
     final activeIndex = _activeLiveChannelIndex(channels);
     setState(() {
       _selectedLiveCategoryId = category.id;
@@ -1296,6 +1375,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           candidates.length,
           renderer: renderer,
           resumePosition: Duration.zero,
+          allowMediaKitFallback: false,
         );
         if (ok) {
           if (mounted) {
@@ -1305,6 +1385,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
         lastError = _errorMessage;
       }
+
+      final ok = await _tryOpenMediaKitCandidate(
+        candidates[index],
+        index,
+        candidates.length,
+        resumePosition: Duration.zero,
+      );
+      if (ok) {
+        if (mounted) {
+          setState(() => _isSwitchingLiveChannel = false);
+        }
+        return;
+      }
+      lastError = _errorMessage;
     }
 
     if (mounted) {
@@ -1330,11 +1424,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
         .toList();
     final extra = <String>[];
     for (final url in candidates) {
-      final lower = url.toLowerCase();
-      if (lower.endsWith('.ts')) {
-        extra.add('${url.substring(0, url.length - 3)}.m3u8');
-      } else if (lower.endsWith('.m3u8')) {
-        extra.add('${url.substring(0, url.length - 5)}.ts');
+      final hlsUrl = _replaceUrlPathExtension(url, '.ts', '.m3u8');
+      if (hlsUrl != null) {
+        extra.add(hlsUrl);
+      }
+      final tsUrl = _replaceUrlPathExtension(url, '.m3u8', '.ts');
+      if (tsUrl != null) {
+        extra.add(tsUrl);
       }
     }
 
@@ -1357,7 +1453,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   int _liveCandidateScore(String url) {
-    final lower = url.toLowerCase();
+    final lower = (Uri.tryParse(url)?.path ?? url).toLowerCase();
     if (lower.endsWith('.m3u8')) {
       return 0;
     }
@@ -1365,6 +1461,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return 1;
     }
     return 2;
+  }
+
+  String? _replaceUrlPathExtension(
+    String url,
+    String fromExtension,
+    String toExtension,
+  ) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return null;
+    }
+
+    final path = uri.path;
+    if (!path.toLowerCase().endsWith(fromExtension)) {
+      return null;
+    }
+
+    final nextPath =
+        path.substring(0, path.length - fromExtension.length) + toExtension;
+    return uri.replace(path: nextPath).toString();
   }
 
   void _handleControlKey(LogicalKeyboardKey key) {
@@ -1495,6 +1611,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       if (channel.id == _activeFavoriteId) {
         _isFavorite = isFavorite;
+      }
+      final channels = _selectedLiveCategoryChannels;
+      if (channels.isEmpty) {
+        _focusedLiveChannelIndex = 0;
+        _channelMenuFavoriteFocused = false;
+      } else if (_focusedLiveChannelIndex >= channels.length) {
+        _focusedLiveChannelIndex = channels.length - 1;
       }
     });
   }
@@ -1901,10 +2024,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               },
                             )
                       : channels.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
-                                'Nenhum canal nesta categoria.',
-                                style: TextStyle(color: Colors.white70),
+                                _selectedLiveCategoryId == _favoritesCategoryId
+                                    ? 'Nenhum canal favorito.'
+                                    : 'Nenhum canal nesta categoria.',
+                                style: const TextStyle(color: Colors.white70),
                               ),
                             )
                           : ListView.builder(
@@ -1932,14 +2057,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     int index,
   ) {
     final focused = index == _focusedLiveCategoryIndex;
-    final count = _liveChannels.where((channel) {
-      final id = channel.categoryId.isNotEmpty
-          ? channel.categoryId
-          : channel.category.isNotEmpty
-              ? channel.category
-              : 'geral';
-      return id == category.id;
-    }).length;
+    final isFavoritesCategory = category.id == _favoritesCategoryId;
+    final count = isFavoritesCategory
+        ? _liveChannels
+            .where((channel) => _favoriteIds.contains(channel.id))
+            .length
+        : _liveChannels
+            .where((channel) => _liveChannelCategoryId(channel) == category.id)
+            .length;
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -1962,9 +2087,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ),
         child: Row(
           children: [
-            const Icon(
-              Icons.folder_rounded,
-              color: Color(0xFFB47CFF),
+            Icon(
+              isFavoritesCategory
+                  ? Icons.favorite_rounded
+                  : Icons.folder_rounded,
+              color: const Color(0xFFB47CFF),
               size: 26,
             ),
             const SizedBox(width: 12),
