@@ -185,18 +185,22 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _queueVisibleLiveEpgRefresh() {
-    _queueSelectedLiveEpgRefresh();
-  }
-
-  void _queueSelectedLiveEpgRefresh() {
-    final item = _selectedItem;
     if (_activeSection != HomeSection.live) {
       return;
     }
-    if (item == null) {
-      return;
-    }
-    _queueLiveEpgRefreshForItem(item);
+    _liveEpgFocusTimer?.cancel();
+    _liveEpgFocusTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted || _activeSection != HomeSection.live) {
+        return;
+      }
+      unawaited(_refreshVisibleLiveEpgItems());
+    });
+  }
+
+  void _resetLiveEpgRefreshState() {
+    _liveEpgRefreshToken++;
+    _liveEpgLoadingIds.clear();
+    _liveEpgFocusTimer?.cancel();
   }
 
   void _queueLiveEpgRefreshForItem(IptvContentItem item) {
@@ -209,6 +213,50 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  Future<void> _refreshVisibleLiveEpgItems() async {
+    final items = _liveEpgRefreshCandidates()
+        .where((item) =>
+            item.type == 'live' &&
+            !item.liveEpgChecked &&
+            !_liveEpgLoadingIds.contains(item.id))
+        .take(16)
+        .toList();
+    if (items.isEmpty) {
+      return;
+    }
+
+    final token = _liveEpgRefreshToken;
+    _liveEpgLoadingIds.addAll(items.map((item) => item.id));
+    try {
+      final updatedItems = await ApiService.fetchLiveEpgItems(
+        items,
+        useXtreamFallback: false,
+      );
+      if (!mounted ||
+          token != _liveEpgRefreshToken ||
+          _activeSection != HomeSection.live) {
+        return;
+      }
+
+      _replaceLiveCatalogItems(
+        updatedItems.isNotEmpty
+            ? updatedItems
+            : items.map(_liveItemWithoutEpg).toList(),
+      );
+    } catch (_) {
+      if (mounted &&
+          token == _liveEpgRefreshToken &&
+          _activeSection == HomeSection.live) {
+        _replaceLiveCatalogItems(items.map(_liveItemWithoutEpg).toList());
+      }
+      return;
+    } finally {
+      for (final item in items) {
+        _liveEpgLoadingIds.remove(item.id);
+      }
+    }
+  }
+
   Future<void> _refreshLiveEpgForItem(IptvContentItem item) async {
     if (item.type != 'live' ||
         item.liveEpgChecked ||
@@ -219,16 +267,27 @@ class _HomeScreenState extends State<HomeScreen> {
     final token = _liveEpgRefreshToken;
     _liveEpgLoadingIds.add(item.id);
     try {
-      final updatedItems = await ApiService.fetchLiveEpgItems([item]);
+      final updatedItems = await ApiService.fetchLiveEpgItems(
+        [item],
+        useXtreamFallback: false,
+      );
       if (!mounted ||
           token != _liveEpgRefreshToken ||
-          _activeSection != HomeSection.live ||
-          updatedItems.isEmpty) {
+          _activeSection != HomeSection.live) {
         return;
       }
 
-      _replaceLiveCatalogItem(updatedItems.first);
+      _replaceLiveCatalogItem(
+        updatedItems.isNotEmpty
+            ? updatedItems.first
+            : _liveItemWithoutEpg(item),
+      );
     } catch (_) {
+      if (mounted &&
+          token == _liveEpgRefreshToken &&
+          _activeSection == HomeSection.live) {
+        _replaceLiveCatalogItem(_liveItemWithoutEpg(item));
+      }
       return;
     } finally {
       _liveEpgLoadingIds.remove(item.id);
@@ -236,10 +295,21 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _replaceLiveCatalogItem(IptvContentItem updatedItem) {
+    _replaceLiveCatalogItems([updatedItem]);
+  }
+
+  void _replaceLiveCatalogItems(List<IptvContentItem> updatedItemsList) {
+    if (updatedItemsList.isEmpty) {
+      return;
+    }
+
+    final updatedById = {
+      for (final item in updatedItemsList) item.id: item,
+    };
     IptvContentItem? selectedItem;
     setState(() {
       final updatedItems = _liveCatalog.items.map((item) {
-        final updated = item.id == updatedItem.id ? updatedItem : item;
+        final updated = updatedById[item.id] ?? item;
         if (_selectedItem?.id == updated.id) {
           selectedItem = updated;
         }
@@ -254,6 +324,48 @@ class _HomeScreenState extends State<HomeScreen> {
         _selectedItem = selectedItem;
       }
     });
+  }
+
+  IptvContentItem _liveItemWithoutEpg(IptvContentItem item) {
+    final currentLabel =
+        item.subtitle == 'Buscando EPG...' ? 'EPG indisponivel' : item.subtitle;
+    final currentNextShowing = item.nextShowing ?? '';
+    final nextLabel = currentNextShowing == 'Aguardando EPG...'
+        ? 'Sem dados do EPG'
+        : currentNextShowing;
+
+    return IptvContentItem(
+      id: item.id,
+      epgChannelId: item.epgChannelId,
+      title: item.title,
+      subtitle: currentLabel,
+      category: item.category,
+      categoryId: item.categoryId,
+      streamUrl: item.streamUrl,
+      alternateStreamUrls: item.alternateStreamUrls,
+      imageUrl: item.imageUrl,
+      type: item.type,
+      nextShowing: nextLabel,
+      rating: item.rating,
+      year: item.year,
+      description: item.description,
+      eventStartDateTime: item.eventStartDateTime,
+      liveEpgChecked: true,
+    );
+  }
+
+  List<IptvContentItem> _liveEpgRefreshCandidates() {
+    final filteredItems = _filteredItems;
+    if (filteredItems.isEmpty) {
+      return const [];
+    }
+
+    final selectedIndex = _selectedItem == null
+        ? -1
+        : filteredItems.indexWhere((item) => item.id == _selectedItem!.id);
+    final start = selectedIndex > 4 ? selectedIndex - 4 : 0;
+    final end = (start + 16).clamp(0, filteredItems.length);
+    return filteredItems.sublist(start, end);
   }
 
   void _openPendingReminderIfNeeded() {
@@ -748,6 +860,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _selectCategory(String categoryId) {
+    if (_activeSection == HomeSection.live) {
+      _resetLiveEpgRefreshState();
+    }
     setState(() {
       _selectedCategory = categoryId;
       final filteredItems = _filteredItems;
@@ -757,6 +872,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _applySearch(String value) {
+    if (_activeSection == HomeSection.live) {
+      _resetLiveEpgRefreshState();
+    }
     setState(() {
       _searchQuery = value.trim();
       final items = _filteredItems;
@@ -2330,6 +2448,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     if (focused) {
                       _collapseSidebar();
                       setState(() => _selectedItem = item);
+                      _queueVisibleLiveEpgRefresh();
                     }
                   },
                   builder: (context, focused) => AnimatedContainer(

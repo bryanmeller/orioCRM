@@ -57,6 +57,7 @@ class CategoryOption {
 
 class IptvContentItem {
   final String id;
+  final String epgChannelId;
   final String title;
   final String subtitle;
   final String category;
@@ -74,6 +75,7 @@ class IptvContentItem {
 
   const IptvContentItem({
     required this.id,
+    this.epgChannelId = '',
     required this.title,
     required this.subtitle,
     required this.category,
@@ -359,6 +361,13 @@ class ApiService {
 
       return IptvContentItem(
         id: streamId.isNotEmpty ? streamId : 'live-$index',
+        epgChannelId: _stringValue(
+          item['epg_channel_id'] ??
+              item['epgChannelId'] ??
+              item['epg_id'] ??
+              item['xmltv_id'] ??
+              item['tvguide_id'],
+        ),
         title: _stringValue(item['name'] ?? item['stream_name'],
             fallback: 'Canal sem Nome'),
         subtitle: _formatProgramNow(item),
@@ -381,13 +390,18 @@ class ApiService {
   }
 
   static Future<List<IptvContentItem>> fetchLiveEpgItems(
-    List<IptvContentItem> items,
-  ) async {
+    List<IptvContentItem> items, {
+    bool useXtreamFallback = true,
+  }) async {
     if (items.isEmpty) {
       return const [];
     }
     final server = await _requireActiveServer();
-    return _attachLiveEpg(server, items);
+    return _attachLiveEpg(
+      server,
+      items,
+      useXtreamFallback: useXtreamFallback,
+    );
   }
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
@@ -985,25 +999,314 @@ class ApiService {
 
   static Future<List<IptvContentItem>> _attachLiveEpg(
     IptvServer server,
-    List<IptvContentItem> items,
-  ) async {
-    const batchSize = 10;
-    final result = List<IptvContentItem>.from(items);
+    List<IptvContentItem> items, {
+    required bool useXtreamFallback,
+  }) async {
+    final centralResult = await _attachCentralLiveEpg(items);
+    final pendingItems = centralResult
+        .asMap()
+        .entries
+        .where((entry) => !entry.value.liveEpgChecked)
+        .toList();
+    if (pendingItems.isEmpty) {
+      return centralResult;
+    }
+    if (!useXtreamFallback) {
+      final result = List<IptvContentItem>.from(centralResult);
+      for (final entry in pendingItems) {
+        result[entry.key] = _itemWithoutLiveEpg(entry.value);
+      }
+      return result;
+    }
 
-    for (var start = 0; start < result.length; start += batchSize) {
-      final end = (start + batchSize).clamp(0, result.length);
+    const batchSize = 10;
+    final result = List<IptvContentItem>.from(centralResult);
+
+    for (var start = 0; start < pendingItems.length; start += batchSize) {
+      final end = (start + batchSize).clamp(0, pendingItems.length);
       final updates = await Future.wait(
         [
           for (var index = start; index < end; index++)
-            _itemWithShortEpg(server, result[index]),
+            _itemWithShortEpg(server, pendingItems[index].value),
         ],
       );
       for (var offset = 0; offset < updates.length; offset++) {
-        result[start + offset] = updates[offset];
+        result[pendingItems[start + offset].key] = updates[offset];
       }
     }
 
     return result;
+  }
+
+  static IptvContentItem _itemWithoutLiveEpg(IptvContentItem item) {
+    final currentLabel =
+        item.subtitle == 'Buscando EPG...' ? 'EPG indisponivel' : item.subtitle;
+    final fallbackNextShowing = item.nextShowing ?? '';
+    final nextLabel = fallbackNextShowing == 'Aguardando EPG...'
+        ? 'Sem dados do EPG'
+        : fallbackNextShowing;
+
+    return _copyLiveItemWithEpg(
+      item,
+      subtitle: currentLabel,
+      nextShowing: nextLabel,
+      liveEpgChecked: true,
+    );
+  }
+
+  static Future<List<IptvContentItem>> _attachCentralLiveEpg(
+    List<IptvContentItem> items,
+  ) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    const batchSize = 120;
+    final result = List<IptvContentItem>.from(items);
+
+    for (var start = 0; start < result.length; start += batchSize) {
+      final end = (start + batchSize).clamp(0, result.length);
+      final batch = result.sublist(start, end);
+      final epgByChannel = await _fetchCentralNowNext(batch);
+      if (epgByChannel.isEmpty) {
+        continue;
+      }
+
+      for (var offset = 0; offset < batch.length; offset++) {
+        final item = batch[offset];
+        final epg = _epgForItem(item, epgByChannel);
+        if (epg != null) {
+          result[start + offset] = _itemWithNowNextEpg(item, epg);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  static Future<Map<String, Map<String, dynamic>>> _fetchCentralNowNext(
+    List<IptvContentItem> items,
+  ) async {
+    final channelIds = items
+        .expand(_epgLookupIds)
+        .where((id) => id.trim().isNotEmpty)
+        .toSet()
+        .toList();
+    final channels = items.map(_epgLookupChannel).toList();
+    if (channelIds.isEmpty && channels.isEmpty) {
+      return const {};
+    }
+
+    try {
+      final headers = await _epgRequestHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/epg/now-next'),
+            headers: headers,
+            body: jsonEncode({
+              'channelIds': channelIds,
+              'channels': channels,
+            }),
+          )
+          .timeout(const Duration(seconds: 4));
+
+      final decoded = _decodeObject(response.body);
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300 ||
+          decoded['success'] != true) {
+        return const {};
+      }
+
+      final data = decoded['data'];
+      if (data is! List) {
+        return const {};
+      }
+
+      final result = <String, Map<String, dynamic>>{};
+      for (var index = 0;
+          index < data.length && index < channels.length;
+          index++) {
+        final item = data[index];
+        if (item is! Map) {
+          continue;
+        }
+        final epg = Map<String, dynamic>.from(item);
+        for (final channelId in _epgStructuredRequestIds(channels[index])) {
+          result[channelId] = epg;
+        }
+        for (final channelId in _epgResponseIds(epg)) {
+          result[channelId] = epg;
+        }
+      }
+      return result;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  static List<String> _epgResponseIds(Map<String, dynamic> epg) {
+    return [
+      epg['channelId'],
+      epg['id'],
+      epg['epgChannelId'],
+      epg['name'],
+      epg['matchedChannelId'],
+    ].map(_stringValue).where((id) => id.trim().isNotEmpty).toSet().toList();
+  }
+
+  static Future<Map<String, String>> _epgRequestHeaders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token') ?? '';
+    final serverId = prefs.getString('selected_server_id') ?? '';
+    return {
+      'Content-Type': 'application/json',
+      if (token.isNotEmpty && token != 'authenticated')
+        'Authorization': 'Bearer $token',
+      if (serverId.isNotEmpty) 'x-server-id': serverId,
+    };
+  }
+
+  static Map<String, String> _epgLookupChannel(IptvContentItem item) {
+    return {
+      'id': item.id,
+      'name': item.title,
+      if (item.epgChannelId.trim().isNotEmpty)
+        'epgChannelId': item.epgChannelId.trim(),
+      'cleanName': _cleanEpgChannelName(item.title),
+    };
+  }
+
+  static List<String> _epgStructuredRequestIds(Map<String, String> channel) {
+    return [
+      channel['id'],
+      channel['name'],
+      channel['cleanName'],
+      channel['epgChannelId'],
+    ].map(_stringValue).where((id) => id.trim().isNotEmpty).toSet().toList();
+  }
+
+  static List<String> _epgLookupIds(IptvContentItem item) {
+    return [
+      item.title,
+      _cleanEpgChannelName(item.title),
+      if (_isSafeEpgChannelId(item)) item.epgChannelId,
+      item.id,
+    ].where((id) => id.trim().isNotEmpty).toSet().toList();
+  }
+
+  static bool _isSafeEpgChannelId(IptvContentItem item) {
+    final epgChannelId = item.epgChannelId.trim();
+    if (epgChannelId.isEmpty) {
+      return false;
+    }
+
+    final epgText = _normalizedEpgMatchText(epgChannelId);
+    final titleText = _normalizedEpgMatchText(item.title);
+    if (epgText.isEmpty || titleText.isEmpty) {
+      return false;
+    }
+
+    final epgTokens = _significantEpgTokens(epgText);
+    final titleTokens = _significantEpgTokens(titleText);
+    if (epgTokens.isEmpty || titleTokens.isEmpty) {
+      return false;
+    }
+
+    return epgTokens.any((token) => titleTokens.contains(token)) ||
+        titleTokens.any((token) => epgText.contains(token));
+  }
+
+  static Set<String> _significantEpgTokens(String value) {
+    const ignored = {
+      'canal',
+      'fhd',
+      'hd',
+      'h264',
+      'h265',
+      'hevc',
+      'sd',
+      'uhd',
+    };
+    return value
+        .split(' ')
+        .where((token) => token.length >= 4 && !ignored.contains(token))
+        .toSet();
+  }
+
+  static String _normalizedEpgMatchText(String value) {
+    return _cleanEpgChannelName(value)
+        .toLowerCase()
+        .replaceAll(RegExp(r'[áàãâä]'), 'a')
+        .replaceAll(RegExp(r'[éèêë]'), 'e')
+        .replaceAll(RegExp(r'[íìîï]'), 'i')
+        .replaceAll(RegExp(r'[óòõôö]'), 'o')
+        .replaceAll(RegExp(r'[úùûü]'), 'u')
+        .replaceAll('ç', 'c')
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static String _cleanEpgChannelName(String value) {
+    return value
+        .replaceAll(
+            RegExp(r'\b(FHD|HD|SD|H264|H265|HEVC|4K)\b', caseSensitive: false),
+            ' ')
+        .replaceAll(RegExp(r'[¹²³ºª°]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static Map<String, dynamic>? _epgForItem(
+    IptvContentItem item,
+    Map<String, Map<String, dynamic>> epgByChannel,
+  ) {
+    for (final id in _epgLookupIds(item)) {
+      final epg = epgByChannel[id];
+      if (epg != null && _hasNowNextData(epg)) {
+        return epg;
+      }
+    }
+    return null;
+  }
+
+  static bool _hasNowNextData(Map<String, dynamic> epg) {
+    return _liveProgramFromNowNext(epg['current']) != null ||
+        _liveProgramFromNowNext(epg['next']) != null;
+  }
+
+  static IptvContentItem _itemWithNowNextEpg(
+    IptvContentItem item,
+    Map<String, dynamic> epg,
+  ) {
+    final current = _liveProgramFromNowNext(epg['current']);
+    final next = _liveProgramFromNowNext(epg['next']);
+    final fallbackNextShowing = item.nextShowing ?? '';
+
+    return _copyLiveItemWithEpg(
+      item,
+      subtitle: current != null
+          ? _formatProgramLabel(current)
+          : item.subtitle == 'Buscando EPG...'
+              ? 'EPG indisponivel'
+              : item.subtitle,
+      nextShowing: next != null
+          ? _formatProgramLabel(next)
+          : fallbackNextShowing == 'Aguardando EPG...'
+              ? 'Sem dados do EPG'
+              : fallbackNextShowing,
+      liveEpgChecked: true,
+    );
+  }
+
+  static _LiveProgram? _liveProgramFromNowNext(dynamic data) {
+    if (data is! Map) {
+      return null;
+    }
+    final program = _liveProgramFromJson(Map<String, dynamic>.from(data));
+    return program.title.isEmpty || _isBrokenEpgText(program.title)
+        ? null
+        : program;
   }
 
   static Future<IptvContentItem> _itemWithShortEpg(
@@ -1015,24 +1318,14 @@ class ApiService {
       final currentLabel = item.subtitle == 'Buscando EPG...'
           ? 'EPG indisponivel'
           : item.subtitle;
-      final nextLabel = item.nextShowing == 'Aguardando EPG...'
+      final fallbackNextShowing = item.nextShowing ?? '';
+      final nextLabel = fallbackNextShowing == 'Aguardando EPG...'
           ? 'Sem dados do EPG'
-          : item.nextShowing;
-      return IptvContentItem(
-        id: item.id,
-        title: item.title,
+          : fallbackNextShowing;
+      return _copyLiveItemWithEpg(
+        item,
         subtitle: currentLabel,
-        category: item.category,
-        categoryId: item.categoryId,
-        streamUrl: item.streamUrl,
-        alternateStreamUrls: item.alternateStreamUrls,
-        imageUrl: item.imageUrl,
-        type: item.type,
         nextShowing: nextLabel,
-        rating: item.rating,
-        year: item.year,
-        description: item.description,
-        eventStartDateTime: item.eventStartDateTime,
         liveEpgChecked: true,
       );
     }
@@ -1072,8 +1365,23 @@ class ApiService {
         ? _formatProgramLabel(next)
         : _formatProgramNextFromItem(item);
 
+    return _copyLiveItemWithEpg(
+      item,
+      subtitle: subtitle,
+      nextShowing: nextShowing,
+      liveEpgChecked: true,
+    );
+  }
+
+  static IptvContentItem _copyLiveItemWithEpg(
+    IptvContentItem item, {
+    required String subtitle,
+    required String nextShowing,
+    required bool liveEpgChecked,
+  }) {
     return IptvContentItem(
       id: item.id,
+      epgChannelId: item.epgChannelId,
       title: item.title,
       subtitle: subtitle,
       category: item.category,
@@ -1087,7 +1395,7 @@ class ApiService {
       year: item.year,
       description: item.description,
       eventStartDateTime: item.eventStartDateTime,
-      liveEpgChecked: true,
+      liveEpgChecked: liveEpgChecked,
     );
   }
 
@@ -1253,6 +1561,27 @@ class ApiService {
     } catch (_) {
       return text;
     }
+  }
+
+  static bool _isBrokenEpgText(String value) {
+    final text = value.trim();
+    if (text.isEmpty) {
+      return true;
+    }
+
+    final replacementCount = text.runes.where((rune) => rune == 0xFFFD).length;
+    if (replacementCount > 0) {
+      return true;
+    }
+
+    final visibleChars = text.replaceAll(RegExp(r'\s+'), '');
+    if (visibleChars.isEmpty) {
+      return true;
+    }
+
+    final letterOrNumberCount =
+        RegExp(r'[A-Za-z0-9À-ÿ]').allMatches(visibleChars).length;
+    return letterOrNumberCount / visibleChars.length < 0.35;
   }
 
   static String _formatProgramLabel(_LiveProgram program) {

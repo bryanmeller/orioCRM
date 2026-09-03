@@ -58,6 +58,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _positionTimer;
   Timer? _reconnectTimer;
   Timer? _controlsTimer;
+  Timer? _seekDebounceTimer;
   final FocusNode _playerFocusNode = FocusNode();
   final ScrollController _channelMenuScrollController = ScrollController();
 
@@ -92,7 +93,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final Set<String> _favoriteIds = {};
   DateTime? _lastBackActionAt;
   Duration _lastPosition = Duration.zero;
+  Duration? _pendingSeekTarget;
   int _lastSavedProgressSecond = -1;
+  int _playbackGeneration = 0;
+  bool _seekInProgress = false;
 
   static const Map<String, String> _iptvHeaders = {
     'User-Agent':
@@ -101,6 +105,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     'Connection': 'keep-alive',
   };
   static const String _favoritesCategoryId = '__favorites__';
+  static const Duration _initialOpenTimeout = Duration(seconds: 14);
+  static const Duration _fallbackOpenTimeout = Duration(seconds: 10);
+  static const Duration _videoStartTimeout = Duration(seconds: 7);
+  static const Duration _mediaKitStartTimeout = Duration(seconds: 10);
 
   static const List<_RendererMode> _rendererModes = [
     _RendererMode(
@@ -153,11 +161,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    _isExitingPlayer = true;
+    _playbackGeneration++;
     _saveFinalPlaybackProgress();
     _stopLoadingTimer();
     _positionTimer?.cancel();
     _reconnectTimer?.cancel();
     _controlsTimer?.cancel();
+    _seekDebounceTimer?.cancel();
     _channelMenuScrollController.dispose();
     _playerFocusNode.dispose();
     unawaited(_disposeMediaKitPlayer());
@@ -337,6 +348,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Map<String, String> get _mediaKitHeaders => _iptvHeaders;
 
   Future<void> _openMedia() async {
+    final generation = ++_playbackGeneration;
     final candidates = _orderedPlaybackCandidates([
       widget.videoUrl,
       ...widget.alternateVideoUrls,
@@ -357,6 +369,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           renderer: renderer,
           resumePosition: widget.initialPosition,
           allowMediaKitFallback: false,
+          generation: generation,
         );
         if (ok) {
           return;
@@ -369,6 +382,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         index,
         candidates.length,
         resumePosition: widget.initialPosition,
+        generation: generation,
       );
       if (ok) {
         return;
@@ -398,7 +412,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _RendererMode? renderer,
     Duration? resumePosition,
     bool allowMediaKitFallback = true,
+    bool preserveReconnectTimer = false,
+    required int generation,
   }) async {
+    if (_isStalePlaybackOperation(generation)) {
+      return false;
+    }
     final activeRenderer = renderer ?? _rendererModes.first;
     final uri = Uri.tryParse(url);
     if (uri == null ||
@@ -435,7 +454,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       );
 
       _setLoadingStatus('Conectando ao servidor...');
-      await nextController.initialize().timeout(const Duration(seconds: 25));
+      await nextController.initialize().timeout(_initialOpenTimeout);
+      if (_isStalePlaybackOperation(generation)) {
+        await nextController.dispose();
+        return false;
+      }
 
       final previous = _controller;
       previous?.removeListener(_onControllerChanged);
@@ -454,7 +477,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _setLoadingStatus('Iniciando video...');
       await _controller!.play();
       await _seekVideoPlayerAfterStart(resumePosition);
-      final started = await _waitForVideoStart(const Duration(seconds: 12));
+      final started = await _waitForVideoStart(
+        _videoStartTimeout,
+        generation: generation,
+      );
+      if (_isStalePlaybackOperation(generation)) {
+        return false;
+      }
       if (started) {
         _markPlaybackStarted();
         _startPositionTicker();
@@ -462,7 +491,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
 
       await _controller?.pause();
-      await _stopActivePlayback();
+      await _stopActivePlayback(preserveReconnectTimer: preserveReconnectTimer);
       if (mounted) {
         setState(() {
           _errorMessage = 'O video nao iniciou nesta URL.';
@@ -471,8 +500,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return false;
     } catch (error) {
       await nextController?.dispose();
+      if (_isStalePlaybackOperation(generation)) {
+        return false;
+      }
       if (assignedController) {
-        await _stopActivePlayback();
+        await _stopActivePlayback(
+          preserveReconnectTimer: preserveReconnectTimer,
+        );
       }
       if (mounted) {
         setState(() {
@@ -490,6 +524,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           index,
           total,
           resumePosition: resumePosition,
+          generation: generation,
         );
       }
       return _tryOpenMediaKitCandidate(
@@ -497,6 +532,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         index,
         total,
         resumePosition: resumePosition,
+        generation: generation,
       );
     }
   }
@@ -516,7 +552,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     int index,
     int total, {
     Duration? resumePosition,
+    required int generation,
   }) async {
+    if (_isStalePlaybackOperation(generation)) {
+      return false;
+    }
     final uri = Uri.tryParse(url);
     if (uri == null ||
         !uri.hasScheme ||
@@ -541,14 +581,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() => _errorMessage = null);
     }
 
+    media_kit.Player? nextPlayer;
     try {
       await _stopActivePlayback();
+      if (_isStalePlaybackOperation(generation)) {
+        return false;
+      }
 
       final player = media_kit.Player(
         configuration: const media_kit.PlayerConfiguration(
           bufferSize: 192 * 1024 * 1024,
         ),
       );
+      nextPlayer = player;
       final controller = media_kit_video.VideoController(player);
       _mediaKitPlayer = player;
       _mediaKitController = controller;
@@ -568,7 +613,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ),
             play: false,
           )
-          .timeout(const Duration(seconds: 25));
+          .timeout(_fallbackOpenTimeout);
+      if (_isStalePlaybackOperation(generation)) {
+        if (_mediaKitPlayer == player) {
+          _mediaKitPlayer = null;
+          _mediaKitController = null;
+        }
+        await player.dispose();
+        return false;
+      }
 
       if (resumePosition != null &&
           resumePosition > const Duration(seconds: 3) &&
@@ -579,8 +632,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _setLoadingStatus('Iniciando video...');
       await player.play();
       final started = await _waitForMediaKitVideoStart(
-        const Duration(seconds: 18),
+        _mediaKitStartTimeout,
+        generation: generation,
       );
+      if (_isStalePlaybackOperation(generation)) {
+        if (_mediaKitPlayer == player) {
+          _mediaKitPlayer = null;
+          _mediaKitController = null;
+        }
+        await player.dispose();
+        return false;
+      }
       if (started) {
         await _seekMediaKitAfterStart(player, resumePosition);
         _markPlaybackStarted();
@@ -598,6 +660,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       return false;
     } catch (error) {
+      if (_isStalePlaybackOperation(generation)) {
+        if (nextPlayer != null && _mediaKitPlayer == nextPlayer) {
+          _mediaKitPlayer = null;
+          _mediaKitController = null;
+        }
+        await nextPlayer?.dispose();
+        return false;
+      }
       await _stopActivePlayback();
       if (mounted) {
         setState(() {
@@ -669,14 +739,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
     _mediaKitErrorSubscription = player.stream.error.listen((error) {
       if (mounted && _hasStartedPlayback) {
+        if (_isRecoverableReadError(error)) {
+          _scheduleStreamRecovery(error);
+          return;
+        }
         setState(() => _errorMessage = _playbackFailureMessage(error));
       }
     });
   }
 
-  Future<bool> _waitForMediaKitVideoStart(Duration timeout) async {
+  Future<bool> _waitForMediaKitVideoStart(
+    Duration timeout, {
+    required int generation,
+  }) async {
     final end = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(end)) {
+      if (_isStalePlaybackOperation(generation)) {
+        return false;
+      }
       final player = _mediaKitPlayer;
       if (player == null) {
         return false;
@@ -691,9 +771,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return false;
   }
 
-  Future<bool> _waitForVideoStart(Duration timeout) async {
+  Future<bool> _waitForVideoStart(
+    Duration timeout, {
+    required int generation,
+  }) async {
     final end = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(end)) {
+      if (_isStalePlaybackOperation(generation)) {
+        return false;
+      }
       final controller = _controller;
       if (controller == null) {
         return false;
@@ -751,6 +837,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
         lower.contains('read');
   }
 
+  bool _isStalePlaybackOperation(int generation) {
+    return _isExitingPlayer || !mounted || generation != _playbackGeneration;
+  }
+
   void _scheduleStreamRecovery(String error) {
     if (_reconnectAttempts >= 3 || _reconnectTimer != null) {
       setState(() => _errorMessage = error);
@@ -758,11 +848,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     _reconnectAttempts += 1;
-    _reconnectTimer = Timer(const Duration(seconds: 2), () async {
+    final generation = _playbackGeneration;
+    _reconnectTimer = Timer(const Duration(milliseconds: 900), () async {
       _reconnectTimer = null;
       final url =
           _activeVideoUrl.isNotEmpty ? _activeVideoUrl : widget.videoUrl;
-      if (!mounted || url.isEmpty) {
+      if (_isStalePlaybackOperation(generation) || url.isEmpty) {
         return;
       }
       await _tryOpenCandidate(
@@ -771,6 +862,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         1,
         renderer: _activeRendererMode,
         resumePosition: _lastPosition,
+        preserveReconnectTimer: true,
+        generation: generation,
       );
     });
   }
@@ -791,9 +884,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _loadingTimer = null;
   }
 
-  Future<void> _stopActivePlayback() async {
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
+  Future<void> _stopActivePlayback({
+    bool preserveReconnectTimer = false,
+  }) async {
+    if (!preserveReconnectTimer) {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+    }
+    _seekDebounceTimer?.cancel();
+    _seekDebounceTimer = null;
+    _pendingSeekTarget = null;
+    _seekInProgress = false;
     _positionTimer?.cancel();
     _positionTimer = null;
     await _disposeMediaKitPlayer();
@@ -844,6 +945,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _stopLoadingTimer();
       setState(() {
         _hasStartedPlayback = true;
+        _reconnectAttempts = 0;
         _errorMessage = null;
         if (_isLiveContent) {
           _controlsVisible = false;
@@ -1146,8 +1248,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     _isExitingPlayer = true;
+    _playbackGeneration++;
+    _saveFinalPlaybackProgress();
+    unawaited(_stopActivePlayback());
     PlayerReturnGuard.arm();
-    Future<void>.delayed(const Duration(milliseconds: 120), () {
+    Future<void>.delayed(const Duration(milliseconds: 60), () {
       if (!mounted) {
         return;
       }
@@ -1341,6 +1446,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
 
+    final generation = ++_playbackGeneration;
     setState(() {
       _isSwitchingLiveChannel = true;
       _activeTitle = channel.title;
@@ -1376,6 +1482,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           renderer: renderer,
           resumePosition: Duration.zero,
           allowMediaKitFallback: false,
+          generation: generation,
         );
         if (ok) {
           if (mounted) {
@@ -1391,6 +1498,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         index,
         candidates.length,
         resumePosition: Duration.zero,
+        generation: generation,
       );
       if (ok) {
         if (mounted) {
@@ -1623,54 +1731,109 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _seekBy(Duration delta) async {
-    final mediaPlayer = _mediaKitPlayer;
-    if (mediaPlayer != null) {
-      if (!_canSeek) {
-        return;
-      }
-      final duration = _mediaKitDuration;
-      var target = mediaPlayer.state.position + delta;
-      if (target < Duration.zero) {
-        target = Duration.zero;
-      }
-      if (duration > Duration.zero && target > duration) {
-        target = duration;
-      }
-      await mediaPlayer.seek(target);
-      _scheduleControlsHide();
+    if (!_canSeek) {
       return;
     }
 
-    final controller = _controller;
-    if (controller == null || !_canSeek) {
+    final duration = _playbackDuration;
+    final base = _pendingSeekTarget ?? _playbackPosition;
+    final target = _clampSeekPosition(base + delta, duration);
+    _queueSeek(target);
+  }
+
+  Future<void> _seekTo(Duration position) async {
+    if (!_canSeek) {
       return;
     }
 
-    final duration = controller.value.duration;
-    var target = controller.value.position + delta;
+    _queueSeek(_clampSeekPosition(position, _playbackDuration));
+  }
+
+  Duration get _playbackPosition {
+    return _mediaKitPlayer?.state.position ??
+        _controller?.value.position ??
+        _lastPosition;
+  }
+
+  Duration get _playbackDuration {
+    return _mediaKitPlayer != null
+        ? _mediaKitDuration
+        : _controller?.value.duration ?? Duration.zero;
+  }
+
+  Duration _clampSeekPosition(Duration position, Duration duration) {
+    var target = position;
     if (target < Duration.zero) {
       target = Duration.zero;
     }
     if (duration > Duration.zero && target > duration) {
       target = duration;
     }
-    await controller.seekTo(target);
-    _scheduleControlsHide();
+    if (duration > const Duration(seconds: 3) &&
+        target > duration - const Duration(seconds: 2)) {
+      target = duration - const Duration(seconds: 2);
+    }
+    return target;
   }
 
-  Future<void> _seekTo(Duration position) async {
+  void _queueSeek(Duration target) {
+    _pendingSeekTarget = target;
+    _lastPosition = target;
+    _showControls(autoHide: false);
+    _seekDebounceTimer?.cancel();
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 220), () {
+      unawaited(_flushPendingSeek());
+    });
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _flushPendingSeek() async {
+    if (_seekInProgress) {
+      return;
+    }
+
+    final target = _pendingSeekTarget;
+    if (target == null || !_canSeek) {
+      return;
+    }
+
+    _pendingSeekTarget = null;
+    _seekInProgress = true;
+    try {
+      await _performSeek(target).timeout(const Duration(seconds: 8));
+      _lastPosition = target;
+    } catch (error) {
+      if (mounted && _isRecoverableReadError(error.toString())) {
+        _scheduleStreamRecovery(error.toString());
+      }
+    } finally {
+      _seekInProgress = false;
+      if (_pendingSeekTarget != null) {
+        unawaited(_flushPendingSeek());
+      } else {
+        _scheduleControlsHide();
+      }
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _performSeek(Duration target) async {
     final mediaPlayer = _mediaKitPlayer;
-    if (mediaPlayer != null && _canSeek) {
-      await mediaPlayer.seek(position);
-      _scheduleControlsHide();
+    if (mediaPlayer != null) {
+      await mediaPlayer.seek(target);
       return;
     }
 
     final controller = _controller;
-    if (controller != null && _canSeek) {
-      await controller.seekTo(position);
-      _scheduleControlsHide();
+    if (controller == null) {
+      return;
     }
+
+    await controller.seekTo(target);
   }
 
   _RendererMode get _activeRendererMode {
@@ -1694,14 +1857,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (url.isEmpty) {
       return;
     }
+    _seekDebounceTimer?.cancel();
+    _seekDebounceTimer = null;
+    _pendingSeekTarget = null;
+    _seekInProgress = false;
+    final generation = ++_playbackGeneration;
     await _tryOpenCandidate(
       url,
       0,
       1,
       renderer: _nextRendererMode,
       resumePosition: _lastPosition,
+      generation: generation,
     );
-    _showControls();
+    if (!_isStalePlaybackOperation(generation)) {
+      _showControls();
+    }
   }
 
   String _formatTime(Duration duration) {
@@ -2324,12 +2495,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Widget _buildControlsOverlay() {
     final controller = _controller;
-    final duration = _mediaKitPlayer != null
-        ? _mediaKitDuration
-        : controller?.value.duration ?? Duration.zero;
-    final position = _mediaKitPlayer?.state.position ??
-        controller?.value.position ??
-        _lastPosition;
+    final duration = _playbackDuration;
+    final position = _pendingSeekTarget ?? _playbackPosition;
     final canSeek = _canSeek && duration > Duration.zero;
     final isPlaying = _mediaKitPlayer != null
         ? _mediaKitPlaying
