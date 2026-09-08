@@ -157,6 +157,7 @@ class _LiveProgram {
 
 class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
+  static const Duration _loginTimeout = Duration(seconds: 30);
   static const String _parentalPinKey = 'parental_control_pin';
   static const String _adultContentBlockedKey = 'adult_content_blocked';
   static const String _defaultParentalPin = '1234';
@@ -189,7 +190,7 @@ class ApiService {
             'deviceInfo': deviceInfo,
           }),
         )
-        .timeout(_requestTimeout);
+        .timeout(_loginTimeout);
 
     final decoded = _decodeObject(response.body);
     if (response.statusCode == 200) {
@@ -1108,7 +1109,7 @@ class ApiService {
               'channels': channels,
             }),
           )
-          .timeout(const Duration(seconds: 4));
+          .timeout(const Duration(seconds: 7));
 
       final decoded = _decodeObject(response.body);
       if (response.statusCode < 200 ||
@@ -1118,27 +1119,45 @@ class ApiService {
       }
 
       final data = decoded['data'];
-      if (data is! List) {
-        return const {};
+      final result = <String, Map<String, dynamic>>{};
+      if (data is List) {
+        for (var index = 0;
+            index < data.length && index < channels.length;
+            index++) {
+          final item = data[index];
+          if (item is! Map) {
+            continue;
+          }
+          final epg = Map<String, dynamic>.from(item);
+          for (final channelId in _epgStructuredRequestIds(channels[index])) {
+            result[channelId] = epg;
+          }
+          for (final channelId in _epgResponseIds(epg)) {
+            result[channelId] = epg;
+          }
+        }
+        return result;
       }
 
-      final result = <String, Map<String, dynamic>>{};
-      for (var index = 0;
-          index < data.length && index < channels.length;
-          index++) {
-        final item = data[index];
-        if (item is! Map) {
-          continue;
+      if (data is Map) {
+        for (final entry in data.entries) {
+          final item = entry.value;
+          if (item is! Map) {
+            continue;
+          }
+          final epg = Map<String, dynamic>.from(item);
+          final entryKey = _stringValue(entry.key);
+          if (entryKey.isNotEmpty) {
+            result[entryKey] = epg;
+          }
+          for (final channelId in _epgResponseIds(epg)) {
+            result[channelId] = epg;
+          }
         }
-        final epg = Map<String, dynamic>.from(item);
-        for (final channelId in _epgStructuredRequestIds(channels[index])) {
-          result[channelId] = epg;
-        }
-        for (final channelId in _epgResponseIds(epg)) {
-          result[channelId] = epg;
-        }
+        return result;
       }
-      return result;
+
+      return const {};
     } catch (_) {
       return const {};
     }
@@ -1150,7 +1169,10 @@ class ApiService {
       epg['id'],
       epg['epgChannelId'],
       epg['name'],
+      epg['requestName'],
       epg['matchedChannelId'],
+      epg['globalChannelId'],
+      epg['matchedName'],
     ].map(_stringValue).where((id) => id.trim().isNotEmpty).toSet().toList();
   }
 
@@ -1162,23 +1184,27 @@ class ApiService {
       'Content-Type': 'application/json',
       if (token.isNotEmpty && token != 'authenticated')
         'Authorization': 'Bearer $token',
-      if (serverId.isNotEmpty) 'x-server-id': serverId,
+      if (serverId.isNotEmpty) 'X-Server-Id': serverId,
     };
   }
 
-  static Map<String, String> _epgLookupChannel(IptvContentItem item) {
+  static Map<String, dynamic> _epgLookupChannel(IptvContentItem item) {
+    final streamId = item.id.trim();
+    final epgChannelId = item.epgChannelId.trim();
+    final channelId = epgChannelId.isNotEmpty ? epgChannelId : streamId;
     return {
-      'id': item.id,
+      if (channelId.isNotEmpty) 'channelId': channelId,
       'name': item.title,
-      if (item.epgChannelId.trim().isNotEmpty)
-        'epgChannelId': item.epgChannelId.trim(),
+      if (streamId.isNotEmpty) 'streamId': int.tryParse(streamId) ?? streamId,
+      if (epgChannelId.isNotEmpty) 'epgChannelId': epgChannelId,
       'cleanName': _cleanEpgChannelName(item.title),
     };
   }
 
-  static List<String> _epgStructuredRequestIds(Map<String, String> channel) {
+  static List<String> _epgStructuredRequestIds(Map<String, dynamic> channel) {
     return [
-      channel['id'],
+      channel['channelId'],
+      channel['streamId'],
       channel['name'],
       channel['cleanName'],
       channel['epgChannelId'],
@@ -1187,10 +1213,10 @@ class ApiService {
 
   static List<String> _epgLookupIds(IptvContentItem item) {
     return [
-      item.title,
-      _cleanEpgChannelName(item.title),
       if (_isSafeEpgChannelId(item)) item.epgChannelId,
       item.id,
+      item.title,
+      _cleanEpgChannelName(item.title),
     ].where((id) => id.trim().isNotEmpty).toSet().toList();
   }
 
@@ -1408,13 +1434,13 @@ class ApiService {
     }
 
     final proxyPrograms = await _fetchShortEpgProxy(server, streamId);
-    if (proxyPrograms.isNotEmpty) {
+    if (_hasCurrentOrFutureProgram(proxyPrograms)) {
       return proxyPrograms;
     }
 
     try {
       final uri = Uri.parse(
-        '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_short_epg&stream_id=${Uri.encodeQueryComponent(streamId)}&limit=8',
+        '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_short_epg&stream_id=${Uri.encodeQueryComponent(streamId)}&limit=24',
       );
       final response = await http.get(
         uri,
@@ -1428,10 +1454,26 @@ class ApiService {
         return const [];
       }
 
-      return _programsFromEpgData(jsonDecode(response.body));
+      final directPrograms = _programsFromEpgData(jsonDecode(response.body));
+      return directPrograms.isNotEmpty ? directPrograms : proxyPrograms;
     } catch (_) {
-      return const [];
+      return proxyPrograms;
     }
+  }
+
+  static bool _hasCurrentOrFutureProgram(List<_LiveProgram> programs) {
+    final now = DateTime.now();
+    return programs.any((program) {
+      final start = program.start;
+      final end = program.end;
+      if (start == null) {
+        return false;
+      }
+      if (end == null) {
+        return !start.isBefore(now);
+      }
+      return end.isAfter(now);
+    });
   }
 
   static Future<List<_LiveProgram>> _fetchShortEpgProxy(
@@ -1502,13 +1544,16 @@ class ApiService {
       ),
       start: _programDateTime(item, const [
         'start_timestamp',
+        'startTimestamp',
         'start',
         'start_time',
         'startTime',
       ]),
       end: _programDateTime(item, const [
         'stop_timestamp',
+        'stopTimestamp',
         'end_timestamp',
+        'endTimestamp',
         'stop',
         'end',
         'end_time',

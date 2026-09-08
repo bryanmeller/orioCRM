@@ -230,7 +230,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final updatedItems = await ApiService.fetchLiveEpgItems(
         items,
-        useXtreamFallback: false,
+        useXtreamFallback: true,
       );
       if (!mounted ||
           token != _liveEpgRefreshToken ||
@@ -269,7 +269,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final updatedItems = await ApiService.fetchLiveEpgItems(
         [item],
-        useXtreamFallback: false,
+        useXtreamFallback: true,
       );
       if (!mounted ||
           token != _liveEpgRefreshToken ||
