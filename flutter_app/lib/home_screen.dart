@@ -186,6 +186,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     : null;
         _loading = false;
       });
+      if (_activeSection == HomeSection.home &&
+          _pendingReminderEventId == null) {
+        _focusSidebarSection(HomeSection.home);
+      }
       _openPendingReminderIfNeeded();
       _queueVisibleLiveEpgRefresh();
     } catch (error) {
@@ -727,6 +731,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       (_sidebarFocusNodes[_activeSection] ??
               _sidebarFocusNodes[HomeSection.home])
+          ?.requestFocus();
+    });
+  }
+
+  void _focusSidebarSection(HomeSection section) {
+    _searchFocusNode.unfocus();
+    _homeKeyboardFocusNode.unfocus();
+    _expandSidebar();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      (_sidebarFocusNodes[section] ?? _sidebarFocusNodes[HomeSection.home])
           ?.requestFocus();
     });
   }
