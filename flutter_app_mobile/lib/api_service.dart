@@ -161,7 +161,7 @@ class ApiService {
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://dimgrey-sardine-991820.hostingersite.com/api',
+    defaultValue: 'https://orioplayer.com/api',
   );
 
   static String get appBaseUrl {

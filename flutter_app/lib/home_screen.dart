@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 import 'api_service.dart';
+import 'device_info.dart';
 import 'player_return_guard.dart';
 import 'reminder_service.dart';
 import 'tv_focus.dart';
@@ -34,7 +35,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   HomeSection _activeSection = HomeSection.home;
   String _serverName = 'Carregando...';
   String? _errorMessage;
@@ -73,6 +74,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _sidebarFocusNodes = {
       for (final section in HomeSection.values) section: FocusNode(),
     };
@@ -83,6 +85,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _searchFocusNode.removeListener(_handleSearchFocusChange);
     _homeKeyboardFocusNode.dispose();
     _parentalToggleFocusNode.dispose();
@@ -108,6 +111,13 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_validateActiveSessionOrExit());
+    }
+  }
+
   void _handleSearchFocusChange() {
     if (mounted) {
       setState(() {});
@@ -125,6 +135,11 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
+      final sessionValid = await _validateActiveSessionOrExit();
+      if (!sessionValid || !mounted) {
+        return;
+      }
+
       final prefs = await SharedPreferences.getInstance();
       final server = await ApiService.getActiveServer();
       final savedFavorites = prefs.getStringList('favorites') ?? [];
@@ -182,6 +197,20 @@ class _HomeScreenState extends State<HomeScreen> {
         _errorMessage = _friendlyError(error);
       });
     }
+  }
+
+  Future<bool> _validateActiveSessionOrExit() async {
+    final deviceId = await DeviceInfoHelper.getDeviceId();
+    final valid = await ApiService.validateSavedSession(
+      deviceId: deviceId,
+      revalidateWithServer: true,
+    );
+    if (!mounted || valid) {
+      return valid;
+    }
+
+    Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+    return false;
   }
 
   void _queueVisibleLiveEpgRefresh() {

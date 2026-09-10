@@ -28,7 +28,10 @@ class _InitialScreenState extends State<InitialScreen> {
   }
 
   Future<void> _goToLogin() async {
-    final hasSavedSession = await ApiService.hasSavedSession();
+    final hasSavedSession = await ApiService.validateSavedSession(
+      deviceId: _deviceId,
+      revalidateWithServer: true,
+    );
     if (!mounted) {
       return;
     }

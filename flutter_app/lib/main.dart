@@ -9,6 +9,7 @@ import 'home_screen.dart';
 import 'player_screen.dart';
 import 'series_details_screen.dart';
 import 'api_service.dart';
+import 'device_info.dart';
 import 'reminder_service.dart';
 
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
@@ -23,7 +24,11 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  final hasSavedSession = await ApiService.hasSavedSession();
+  final deviceId = await DeviceInfoHelper.getDeviceId();
+  final hasSavedSession = await ApiService.validateSavedSession(
+    deviceId: deviceId,
+    revalidateWithServer: true,
+  );
   final initialRoute = hasSavedSession ? '/home' : '/';
 
   runApp(
@@ -89,7 +94,11 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
       return;
     }
 
-    final hasSavedSession = await ApiService.hasSavedSession();
+    final deviceId = await DeviceInfoHelper.getDeviceId();
+    final hasSavedSession = await ApiService.validateSavedSession(
+      deviceId: deviceId,
+      revalidateWithServer: true,
+    );
     final navigator = appNavigatorKey.currentState;
     if (navigator == null) {
       return;
@@ -208,7 +217,10 @@ class _LoginGate extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<bool>(
-      future: ApiService.hasSavedSession(),
+      future: ApiService.validateSavedSession(
+        deviceId: deviceId,
+        revalidateWithServer: true,
+      ),
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Scaffold(

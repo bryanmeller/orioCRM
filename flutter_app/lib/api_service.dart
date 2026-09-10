@@ -158,13 +158,14 @@ class _LiveProgram {
 class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
   static const Duration _loginTimeout = Duration(seconds: 30);
+  static const Duration _sessionValidationTimeout = Duration(seconds: 12);
   static const String _parentalPinKey = 'parental_control_pin';
   static const String _adultContentBlockedKey = 'adult_content_blocked';
   static const String _defaultParentalPin = '1234';
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://dimgrey-sardine-991820.hostingersite.com/api',
+    defaultValue: 'https://orioplayer.com/api',
   );
 
   static String get appBaseUrl {
@@ -194,30 +195,7 @@ class ApiService {
 
     final decoded = _decodeObject(response.body);
     if (response.statusCode == 200) {
-      final prefs = await SharedPreferences.getInstance();
-
-      if (decoded['user'] != null) {
-        await prefs.setString('user_data', jsonEncode(decoded['user']));
-      }
-
-      if (decoded['license'] != null) {
-        await prefs.setString('license_data', jsonEncode(decoded['license']));
-      }
-
-      if (decoded['servers'] != null) {
-        await prefs.setString('servers_data', jsonEncode(decoded['servers']));
-      }
-
-      final token = _stringValue(
-        decoded['token'] ??
-            decoded['authToken'] ??
-            decoded['access_token'] ??
-            decoded['sessionToken'],
-      );
-      await prefs.setString(
-        'auth_token',
-        token.isNotEmpty ? token : 'authenticated',
-      );
+      await _saveSessionPayload(decoded);
 
       return decoded;
     }
@@ -660,10 +638,197 @@ class ApiService {
   }
 
   static Future<bool> hasSavedSession() async {
+    return isSavedSessionLocallyValid();
+  }
+
+  static Future<bool> isSavedSessionLocallyValid() async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('auth_token') ?? '';
     final servers = prefs.getString('servers_data') ?? '';
-    return token.isNotEmpty || servers.isNotEmpty;
+    if (token.isEmpty && servers.isEmpty) {
+      return false;
+    }
+
+    final license = _savedLicenseData(prefs);
+    if (license == null) {
+      return true;
+    }
+
+    if (!_isLicensePayloadActive(license)) {
+      await logout();
+      return false;
+    }
+
+    return true;
+  }
+
+  static Future<bool> validateSavedSession({
+    String? deviceId,
+    bool revalidateWithServer = false,
+  }) async {
+    final localValid = await isSavedSessionLocallyValid();
+    if (!localValid) {
+      return false;
+    }
+
+    if (!revalidateWithServer ||
+        _stringValue(deviceId).isEmpty ||
+        !await _shouldRevalidateWithDeviceLogin()) {
+      return true;
+    }
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Device-Id': _stringValue(deviceId),
+            },
+            body: jsonEncode({'deviceId': deviceId}),
+          )
+          .timeout(_sessionValidationTimeout);
+
+      final decoded = _decodeObject(response.body);
+      if (response.statusCode == 200 && decoded['success'] == true) {
+        await _saveSessionPayload(decoded);
+        return isSavedSessionLocallyValid();
+      }
+
+      final code = _stringValue(decoded['code']);
+      final error = _stringValue(decoded['error']);
+      if (response.statusCode == 401 ||
+          response.statusCode == 403 ||
+          code == 'DEVICE_NOT_LINKED' ||
+          code == 'DEVICE_AMBIGUOUS' ||
+          code == 'LICENSE_EXPIRED' ||
+          error.toLowerCase().contains('licença expirada') ||
+          error.toLowerCase().contains('licenca expirada') ||
+          error.toLowerCase().contains('bloqueada') ||
+          error.toLowerCase().contains('inativa') ||
+          error.toLowerCase().contains('cancelada')) {
+        await logout();
+        return false;
+      }
+
+      return localValid;
+    } catch (_) {
+      return localValid;
+    }
+  }
+
+  static Future<void> _saveSessionPayload(Map<String, dynamic> decoded) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (decoded['user'] != null) {
+      await prefs.setString('user_data', jsonEncode(decoded['user']));
+    }
+
+    if (decoded['license'] != null) {
+      await prefs.setString('license_data', jsonEncode(decoded['license']));
+    }
+
+    if (decoded['servers'] != null) {
+      await prefs.setString('servers_data', jsonEncode(decoded['servers']));
+    }
+
+    final token = _stringValue(
+      decoded['token'] ??
+          decoded['authToken'] ??
+          decoded['access_token'] ??
+          decoded['sessionToken'],
+    );
+    await prefs.setString(
+      'auth_token',
+      token.isNotEmpty ? token : 'authenticated',
+    );
+  }
+
+  static Map<String, dynamic>? _savedLicenseData(SharedPreferences prefs) {
+    final rawLicense = prefs.getString('license_data') ?? '';
+    if (rawLicense.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(rawLicense);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  static Map<String, dynamic>? _savedUserData(SharedPreferences prefs) {
+    final rawUser = prefs.getString('user_data') ?? '';
+    if (rawUser.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(rawUser);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  static Future<bool> _shouldRevalidateWithDeviceLogin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final user = _savedUserData(prefs);
+    final license = _savedLicenseData(prefs);
+
+    final role = _stringValue(user?['role']).toUpperCase();
+    final providerCode = _stringValue(
+      user?['provider_code'] ?? user?['providerCode'],
+    );
+    if (role == 'PROVIDER' || providerCode.isNotEmpty) {
+      return false;
+    }
+
+    return license != null && _sessionExpiryDate(license) != null;
+  }
+
+  static bool _isLicensePayloadActive(Map<String, dynamic> license) {
+    final status = _stringValue(license['status']).toUpperCase();
+    if (status.isNotEmpty && !const {'ACTIVE', 'TRIAL'}.contains(status)) {
+      return false;
+    }
+
+    final expiresAt = _sessionExpiryDate(license);
+    if (expiresAt == null) {
+      return true;
+    }
+
+    return expiresAt.isAfter(DateTime.now());
+  }
+
+  static DateTime? _sessionExpiryDate(Map<String, dynamic> license) {
+    for (final key in [
+      'expires_at',
+      'valid_until',
+      'validUntil',
+      'expiresAt',
+    ]) {
+      final value = _stringValue(license[key]);
+      if (value.isEmpty) {
+        continue;
+      }
+      final parsed = DateTime.tryParse(value.replaceFirst(' ', 'T'));
+      if (parsed != null) {
+        return parsed.toLocal();
+      }
+    }
+    return null;
   }
 
   static Future<bool> isAdultContentBlocked() async {
