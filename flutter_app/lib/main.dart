@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'initial_screen.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
+import 'movie_details_screen.dart';
 import 'player_screen.dart';
 import 'series_details_screen.dart';
 import 'api_service.dart';
@@ -193,6 +194,26 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
                 ),
               ),
             );
+          case '/movie':
+            final args = settings.arguments;
+            final movie = args is IptvContentItem
+                ? args
+                : args is Map<String, dynamic>
+                    ? args['movie']
+                    : null;
+            final relatedMovies = args is Map<String, dynamic> &&
+                    args['movies'] is List
+                ? (args['movies'] as List).whereType<IptvContentItem>().toList()
+                : <IptvContentItem>[];
+            if (movie is IptvContentItem) {
+              return MaterialPageRoute(
+                builder: (_) => MovieDetailsScreen(
+                  movie: movie,
+                  relatedMovies: relatedMovies,
+                ),
+              );
+            }
+            return MaterialPageRoute(builder: (_) => const HomeScreen());
           case '/series':
             final series = settings.arguments;
             if (series is IptvContentItem) {

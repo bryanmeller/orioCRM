@@ -1368,6 +1368,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return;
       }
 
+      if (item.type == 'movie') {
+        await Navigator.of(context).pushNamed(
+          '/movie',
+          arguments: {
+            'movie': item,
+            'movies': _visibleMovieCatalog.items,
+          },
+        );
+        if (mounted) {
+          final prefs = await SharedPreferences.getInstance();
+          final savedFavorites = prefs.getStringList('favorites') ?? [];
+          final continueWatching = await ApiService.getContinueWatchingItems();
+          setState(() {
+            _favorites
+              ..clear()
+              ..addAll(savedFavorites);
+            _continueWatchingItems = continueWatching;
+          });
+        }
+        return;
+      }
+
       if (item.streamUrl.isEmpty) {
         throw Exception('Este conteudo nao possui URL de reproducao.');
       }

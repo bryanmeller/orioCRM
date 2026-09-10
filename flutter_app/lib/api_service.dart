@@ -438,6 +438,108 @@ class ApiService {
     return IptvCatalog(categories: categories, items: items);
   }
 
+  static Future<IptvContentItem> fetchMovieDetails(
+    IptvContentItem movie,
+  ) async {
+    final server = await _requireActiveServer();
+    final uri = Uri.parse(
+      '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_vod_info&vod_id=${Uri.encodeQueryComponent(movie.id)}',
+    );
+    final response = await http.get(
+      uri,
+      headers: const {
+        'Accept': 'application/json, text/plain, */*',
+        'User-Agent': 'IPTVSmartersPro/1.0 (Linux; Android 10)',
+      },
+    ).timeout(_requestTimeout);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+    }
+
+    final decoded = _decodeObject(response.body);
+    final rawInfo = decoded['info'];
+    final rawMovieData = decoded['movie_data'];
+    final info = rawInfo is Map
+        ? Map<String, dynamic>.from(rawInfo)
+        : <String, dynamic>{};
+    final movieData = rawMovieData is Map
+        ? Map<String, dynamic>.from(rawMovieData)
+        : <String, dynamic>{};
+    final merged = <String, dynamic>{
+      ...decoded,
+      ...movieData,
+      ...info,
+    };
+    final imageUrl = _imageUrl(merged, server);
+    final rating = _rating(merged);
+    final description = _firstNonEmptyString([
+      info['plot'],
+      info['description'],
+      info['overview'],
+      info['plot_long'],
+      info['movie_description'],
+      info['o_description'],
+      movieData['plot'],
+      movieData['description'],
+      movieData['overview'],
+      movieData['plot_long'],
+      decoded['plot'],
+      decoded['description'],
+      decoded['overview'],
+      decoded['plot_long'],
+      movie.description,
+    ]);
+
+    final year = _stringValue(info['releasedate']).isNotEmpty
+        ? _stringValue(info['releasedate']).split('-').first
+        : _stringValue(info['release_date']).isNotEmpty
+            ? _stringValue(info['release_date']).split('-').first
+            : _stringValue(info['year'], fallback: movie.year ?? '');
+    final ext = _stringValue(
+      movieData['container_extension'] ?? info['container_extension'],
+      fallback: 'mp4',
+    );
+    var streamUrl = _stringValue(
+      movieData['streamUrl'] ??
+          movieData['url'] ??
+          movieData['direct_source'] ??
+          info['streamUrl'] ??
+          info['url'] ??
+          info['direct_source'],
+      fallback: movie.streamUrl,
+    );
+    if (streamUrl.isEmpty && movie.id.isNotEmpty) {
+      streamUrl =
+          '${server.cleanBaseUrl}/movie/${server.encodedUsername}/${server.encodedPassword}/${movie.id}.$ext';
+    }
+
+    return IptvContentItem(
+      id: movie.id,
+      epgChannelId: movie.epgChannelId,
+      title: _stringValue(
+        movieData['name'] ??
+            info['name'] ??
+            movieData['title'] ??
+            info['title'],
+        fallback: movie.title,
+      ),
+      subtitle: [
+        if (year.isNotEmpty) year,
+        movie.category,
+      ].join(' - '),
+      category: movie.category,
+      categoryId: movie.categoryId,
+      streamUrl: streamUrl,
+      alternateStreamUrls: movie.alternateStreamUrls,
+      imageUrl: imageUrl.isNotEmpty ? imageUrl : movie.imageUrl,
+      type: movie.type,
+      rating: rating.isNotEmpty ? rating : movie.rating,
+      year: year.isNotEmpty ? year : movie.year,
+      description: description,
+    );
+  }
+
   static Future<IptvCatalog> fetchSeriesCatalog() async {
     final server = await _requireActiveServer();
     final categoriesData = await _fetchXtream(server, 'get_series_categories');
@@ -2081,6 +2183,16 @@ class ApiService {
       final value = _stringValue(item[key]);
       if (value.isNotEmpty) {
         return value;
+      }
+    }
+    return '';
+  }
+
+  static String _firstNonEmptyString(List<dynamic> values) {
+    for (final value in values) {
+      final text = _stringValue(value);
+      if (text.isNotEmpty) {
+        return text;
       }
     }
     return '';
