@@ -52,6 +52,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final FocusNode _changeServerFocusNode = FocusNode();
   final FocusNode _logoutAccountFocusNode = FocusNode();
   final FocusNode _refreshFocusNode = FocusNode();
+  final ScrollController _catalogScrollController = ScrollController();
+  final ScrollController _homeDashboardScrollController = ScrollController();
+  final ScrollController _settingsScrollController = ScrollController();
   late final Map<HomeSection, FocusNode> _sidebarFocusNodes;
 
   IptvCatalog _liveCatalog = const IptvCatalog(categories: [], items: []);
@@ -68,6 +71,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final Map<String, FocusNode> _gameReminderFocusNodes = {};
   final Map<String, FocusNode> _categoryFocusNodes = {};
   int _liveEpgRefreshToken = 0;
+  int _homeLoadToken = 0;
   final Set<String> _liveEpgLoadingIds = {};
   Timer? _liveEpgFocusTimer;
 
@@ -93,6 +97,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _changeServerFocusNode.dispose();
     _logoutAccountFocusNode.dispose();
     _refreshFocusNode.dispose();
+    _catalogScrollController.dispose();
+    _homeDashboardScrollController.dispose();
+    _settingsScrollController.dispose();
     _liveEpgFocusTimer?.cancel();
     for (final node in _sidebarFocusNodes.values) {
       node.dispose();
@@ -127,7 +134,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _loadHome() async {
+  Future<void> _loadHome({bool refreshServersFirst = false}) async {
+    final loadToken = ++_homeLoadToken;
     _liveEpgRefreshToken++;
     setState(() {
       _loading = true;
@@ -135,40 +143,40 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
 
     try {
-      final sessionValid = await _validateActiveSessionOrExit();
+      final sessionValid = await _validateActiveSessionOrExit(
+        revalidateWithServer: !refreshServersFirst,
+      );
       if (!sessionValid || !mounted) {
         return;
       }
 
+      final deviceId = await DeviceInfoHelper.getDeviceId();
       final prefs = await SharedPreferences.getInstance();
-      final server = await ApiService.getActiveServer();
       final savedFavorites = prefs.getStringList('favorites') ?? [];
       final continueWatching = await ApiService.getContinueWatchingItems();
       final adultContentBlocked = await ApiService.isAdultContentBlocked();
       final activeReminders = await ReminderService.getActiveReminders();
-      final serverName = server?.name ??
-          prefs.getString('selected_server_name') ??
-          'Servidor Desconhecido';
+      final savedServerName =
+          prefs.getString('selected_server_name') ?? 'Servidor Desconhecido';
 
-      if (mounted) {
-        setState(() => _serverName = serverName);
+      if (mounted && loadToken == _homeLoadToken) {
+        setState(() => _serverName = savedServerName);
       }
 
-      final catalogs = await Future.wait([
-        ApiService.fetchLiveCatalog(),
-        ApiService.fetchMoviesCatalog(),
-        ApiService.fetchSeriesCatalog(),
-      ]);
+      final catalogs = await ApiService.fetchHomeCatalogsWithFailover(
+        deviceId: deviceId,
+        refreshServersFirst: refreshServersFirst,
+      );
 
-      if (!mounted) {
+      if (!mounted || loadToken != _homeLoadToken) {
         return;
       }
 
       setState(() {
-        _serverName = serverName;
-        _liveCatalog = catalogs[0];
-        _movieCatalog = catalogs[1];
-        _seriesCatalog = catalogs[2];
+        _serverName = catalogs.server.name;
+        _liveCatalog = catalogs.live;
+        _movieCatalog = catalogs.movies;
+        _seriesCatalog = catalogs.series;
         _continueWatchingItems = continueWatching;
         _adultContentBlocked = adultContentBlocked;
         _favorites
@@ -177,31 +185,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _activeReminderIds
           ..clear()
           ..addAll(activeReminders.keys);
-        _selectedItem = _visibleLiveCatalog.items.isNotEmpty
-            ? _visibleLiveCatalog.items.first
-            : _visibleMovieCatalog.items.isNotEmpty
-                ? _visibleMovieCatalog.items.first
-                : _seriesCatalog.items.isNotEmpty
-                    ? _seriesCatalog.items.first
-                    : null;
+        _selectedItem = _firstSelectableItemForCurrentSection();
         _loading = false;
       });
-      if (_activeSection == HomeSection.home &&
-          _pendingReminderEventId == null) {
-        _focusSidebarSection(HomeSection.home);
+      if (_selectedItem == null) {
+        _focusRefreshButton();
+      } else {
+        _focusFirstSelectedSectionItem(_activeSection);
       }
       _openPendingReminderIfNeeded();
       _queueVisibleLiveEpgRefresh();
       unawaited(_refreshLiveEpgCacheInBackground());
     } catch (error) {
-      if (!mounted) {
+      if (!mounted || loadToken != _homeLoadToken) {
         return;
       }
       setState(() {
         _loading = false;
         _errorMessage = _friendlyError(error);
       });
+      _focusRefreshButton();
     }
+  }
+
+  IptvContentItem? _firstSelectableItemForCurrentSection() {
+    if (_activeSection == HomeSection.home) {
+      return _visibleLiveCatalog.items.isNotEmpty
+          ? _visibleLiveCatalog.items.first
+          : _visibleMovieCatalog.items.isNotEmpty
+              ? _visibleMovieCatalog.items.first
+              : _seriesCatalog.items.isNotEmpty
+                  ? _seriesCatalog.items.first
+                  : null;
+    }
+
+    final items = _filteredItems;
+    return items.isNotEmpty ? items.first : null;
   }
 
   Future<void> _refreshLiveEpgCacheInBackground() async {
@@ -224,11 +243,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<bool> _validateActiveSessionOrExit() async {
+  Future<bool> _validateActiveSessionOrExit({
+    bool revalidateWithServer = true,
+  }) async {
     final deviceId = await DeviceInfoHelper.getDeviceId();
     final valid = await ApiService.validateSavedSession(
       deviceId: deviceId,
-      revalidateWithServer: true,
+      revalidateWithServer: revalidateWithServer,
     );
     if (!mounted || valid) {
       return valid;
@@ -583,7 +604,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _seriesCatalog = const IptvCatalog(categories: [], items: []);
       _continueWatchingItems = const [];
     });
-    await _loadHome();
+    await _loadHome(refreshServersFirst: true);
   }
 
   Future<void> _confirmExitApp() async {
@@ -707,6 +728,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _selectSection(HomeSection section) {
+    final leavingLiveSection =
+        _activeSection == HomeSection.live && section != HomeSection.live;
+    if (leavingLiveSection) {
+      _resetLiveEpgRefreshState();
+    }
+
     setState(() {
       _activeSection = section;
       _sidebarExpanded = false;
@@ -716,11 +743,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final catalog = _activeCatalog;
       _selectedItem = catalog.items.isNotEmpty ? catalog.items.first : null;
     });
+    _scrollCurrentContentToTop();
+
+    if (_loading) {
+      _searchFocusNode.unfocus();
+      return;
+    }
 
     _focusFirstSelectedSectionItem(section);
     if (section == HomeSection.live) {
       _queueVisibleLiveEpgRefresh();
-    } else {
+    } else if (!leavingLiveSection) {
       _liveEpgRefreshToken++;
       _liveEpgLoadingIds.clear();
       _liveEpgFocusTimer?.cancel();
@@ -756,16 +789,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
-  void _focusSidebarSection(HomeSection section) {
+  void _focusRefreshButton() {
     _searchFocusNode.unfocus();
     _homeKeyboardFocusNode.unfocus();
-    _expandSidebar();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
       }
-      (_sidebarFocusNodes[section] ?? _sidebarFocusNodes[HomeSection.home])
-          ?.requestFocus();
+      _refreshFocusNode.requestFocus();
     });
   }
 
@@ -856,7 +887,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _focusFirstSelectedSectionItem(HomeSection section) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
+      if (!mounted || _activeSection != section) {
         return;
       }
 
@@ -935,7 +966,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final filteredItems = _filteredItems;
       _selectedItem = filteredItems.isNotEmpty ? filteredItems.first : null;
     });
+    _scrollCatalogToTop();
     _queueVisibleLiveEpgRefresh();
+  }
+
+  void _scrollCatalogToTop() {
+    _scrollControllerToTop(_catalogScrollController);
+  }
+
+  void _scrollCurrentContentToTop() {
+    switch (_activeSection) {
+      case HomeSection.home:
+        _scrollControllerToTop(_homeDashboardScrollController);
+        return;
+      case HomeSection.settings:
+        _scrollControllerToTop(_settingsScrollController);
+        return;
+      case HomeSection.live:
+      case HomeSection.movies:
+      case HomeSection.series:
+      case HomeSection.favorites:
+        _scrollControllerToTop(_catalogScrollController);
+        return;
+    }
+  }
+
+  void _scrollControllerToTop(ScrollController controller) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !controller.hasClients) {
+        return;
+      }
+      controller.jumpTo(0);
+    });
   }
 
   void _applySearch(String value) {
@@ -947,6 +1009,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final items = _filteredItems;
       _selectedItem = items.isNotEmpty ? items.first : null;
     });
+    _scrollCatalogToTop();
     _queueVisibleLiveEpgRefresh();
   }
 
@@ -1709,10 +1772,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildTopBar() {
-    final canSearch = _activeSection == HomeSection.live ||
-        _activeSection == HomeSection.movies ||
-        _activeSection == HomeSection.series ||
-        _activeSection == HomeSection.favorites;
+    final canSearch = !_loading &&
+        (_activeSection == HomeSection.live ||
+            _activeSection == HomeSection.movies ||
+            _activeSection == HomeSection.series ||
+            _activeSection == HomeSection.favorites);
 
     return Container(
       height: 70,
@@ -1755,7 +1819,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ],
               TvFocusable(
                 focusNode: _refreshFocusNode,
-                onPressed: _loadHome,
+                onPressed: () => _loadHome(refreshServersFirst: true),
                 onFocusChange: (focused) {
                   if (focused) {
                     _collapseSidebar();
@@ -1816,6 +1880,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final moviesPreview = _visibleMovieCatalog.items.take(10).toList();
 
     return SingleChildScrollView(
+      controller: _homeDashboardScrollController,
       padding: const EdgeInsets.all(24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2438,7 +2503,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       child: SizedBox(
         height: compact ? 42 : 52,
         child: AndroidTVTextField(
-          key: ValueKey('search-${_activeSection.name}'),
+          key: const ValueKey('home-search'),
           focusNode: _searchFocusNode,
           controller: _searchController,
           height: compact ? 42 : 52,
@@ -2498,6 +2563,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 .clamp(1, items.length);
 
         return GridView.builder(
+          controller: _catalogScrollController,
           padding: EdgeInsets.zero,
           gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
             maxCrossAxisExtent: maxCrossAxisExtent,
@@ -2535,6 +2601,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           const Divider(height: 1, color: Colors.white10),
           Expanded(
             child: ListView.separated(
+              controller: _catalogScrollController,
               itemCount: items.length,
               separatorBuilder: (_, __) =>
                   const Divider(height: 1, color: Colors.white10),
@@ -2845,6 +2912,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildSettings() {
     return SingleChildScrollView(
+      controller: _settingsScrollController,
       padding: const EdgeInsets.fromLTRB(28, 28, 28, 36),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2943,7 +3011,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _buildFocusButton(
               icon: Icons.refresh,
               label: 'Tentar Novamente',
-              onPressed: _loadHome,
+              onPressed: () => _loadHome(refreshServersFirst: true),
               moveLeftToSidebar: true,
             ),
           ],

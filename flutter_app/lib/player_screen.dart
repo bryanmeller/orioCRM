@@ -290,6 +290,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return categories;
   }
 
+  Map<String, int> _liveCategoryCounts() {
+    final counts = <String, int>{_favoritesCategoryId: 0};
+    for (final channel in _liveChannels) {
+      final categoryId = _liveChannelCategoryId(channel);
+      counts[categoryId] = (counts[categoryId] ?? 0) + 1;
+      if (_favoriteIds.contains(channel.id)) {
+        counts[_favoritesCategoryId] = (counts[_favoritesCategoryId] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }
+
   List<IptvContentItem> get _selectedLiveCategoryChannels {
     final channels = _liveChannels;
     if (_selectedLiveCategoryId.isEmpty) {
@@ -1433,7 +1445,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _controlsTimer?.cancel();
     _playerFocusNode.requestFocus();
     _scrollFocusedLiveChannelIntoView();
-    unawaited(_refreshChannelMenuEpgCacheInBackground());
   }
 
   void _closeChannelMenu() {
@@ -1443,29 +1454,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _channelMenuVisible = false;
     });
     _playerFocusNode.requestFocus();
-  }
-
-  Future<void> _refreshChannelMenuEpgCacheInBackground() async {
-    final token = _channelMenuEpgRefreshToken;
-    final items = _liveChannels.where((item) => item.type == 'live').toList();
-    if (items.isEmpty) {
-      return;
-    }
-
-    try {
-      final updatedItems = await ApiService.refreshLiveEpgCache(items);
-      if (!mounted ||
-          token != _channelMenuEpgRefreshToken ||
-          updatedItems.isEmpty) {
-        return;
-      }
-      _replaceChannelMenuLiveItems(
-        updatedItems.map(_liveItemWithResolvedEpgLabel).toList(),
-      );
-      _queueChannelMenuEpgRefresh(delay: const Duration(milliseconds: 120));
-    } catch (_) {
-      // The focused-window refresh below remains the responsive path.
-    }
   }
 
   void _moveFocusedLiveChannel(int delta, List<IptvContentItem> channels) {
@@ -1486,6 +1474,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     final nextIndex =
         (_focusedLiveCategoryIndex + delta).clamp(0, categories.length - 1);
+    if (nextIndex == _focusedLiveCategoryIndex) {
+      return;
+    }
     setState(() => _focusedLiveCategoryIndex = nextIndex);
     _scrollFocusedLiveChannelIntoView();
   }
@@ -1592,6 +1583,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
 
       target = target.clamp(0.0, position.maxScrollExtent);
+      if (_channelMenuShowingCategories) {
+        _channelMenuScrollController.jumpTo(target);
+        return;
+      }
+
       _channelMenuScrollController.animateTo(
         target,
         duration: const Duration(milliseconds: 70),
@@ -1645,30 +1641,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     Object? lastError;
     for (var index = 0; index < candidates.length; index++) {
-      for (final renderer in _rendererModes) {
-        final ok = await _tryOpenCandidate(
-          candidates[index],
-          index,
-          candidates.length,
-          renderer: renderer,
-          resumePosition: Duration.zero,
-          allowMediaKitFallback: false,
-          generation: generation,
-        );
-        if (ok) {
-          if (mounted) {
-            setState(() => _isSwitchingLiveChannel = false);
-          }
-          return;
-        }
-        lastError = _errorMessage;
-      }
-
-      final ok = await _tryOpenMediaKitCandidate(
+      final ok = await _tryOpenCandidate(
         candidates[index],
         index,
         candidates.length,
+        renderer: _activeRendererMode,
         resumePosition: Duration.zero,
+        allowMediaKitFallback: false,
         generation: generation,
       );
       if (ok) {
@@ -2271,6 +2250,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildChannelMenu() {
     final categories = _liveCategories;
     final channels = _selectedLiveCategoryChannels;
+    final categoryCounts = _liveCategoryCounts();
     _LiveCategoryOption? selectedCategory;
     for (final category in categories) {
       if (category.id == _selectedLiveCategoryId) {
@@ -2359,9 +2339,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               padding: const EdgeInsets.symmetric(vertical: 8),
                               itemCount: categories.length,
                               itemBuilder: (context, index) {
+                                final category = categories[index];
                                 return _buildChannelCategoryMenuItem(
-                                  categories[index],
+                                  category,
                                   index,
+                                  categoryCounts[category.id] ?? 0,
                                 );
                               },
                             )
@@ -2397,16 +2379,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildChannelCategoryMenuItem(
     _LiveCategoryOption category,
     int index,
+    int count,
   ) {
     final focused = index == _focusedLiveCategoryIndex;
     final isFavoritesCategory = category.id == _favoritesCategoryId;
-    final count = isFavoritesCategory
-        ? _liveChannels
-            .where((channel) => _favoriteIds.contains(channel.id))
-            .length
-        : _liveChannels
-            .where((channel) => _liveChannelCategoryId(channel) == category.id)
-            .length;
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,

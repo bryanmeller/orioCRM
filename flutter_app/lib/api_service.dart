@@ -100,6 +100,20 @@ class IptvCatalog {
   const IptvCatalog({required this.categories, required this.items});
 }
 
+class IptvHomeCatalogs {
+  final IptvServer server;
+  final IptvCatalog live;
+  final IptvCatalog movies;
+  final IptvCatalog series;
+
+  const IptvHomeCatalogs({
+    required this.server,
+    required this.live,
+    required this.movies,
+    required this.series,
+  });
+}
+
 class ContinueWatchingItem {
   final IptvContentItem item;
   final Duration position;
@@ -303,8 +317,141 @@ class ApiService {
     await prefs.setString('selected_server_name', server.name);
   }
 
+  static Future<IptvHomeCatalogs> fetchHomeCatalogsWithFailover({
+    String deviceId = '',
+    bool refreshServersFirst = false,
+  }) async {
+    if (refreshServersFirst) {
+      await _tryRefreshSavedSession(deviceId: deviceId);
+    }
+
+    var servers = await getSavedServers();
+    if (servers.isEmpty) {
+      await _tryRefreshSavedSession(deviceId: deviceId);
+      servers = await getSavedServers();
+    }
+    if (servers.isEmpty) {
+      throw Exception('Servidor nao configurado. Faca login novamente.');
+    }
+
+    var triedRefreshAfterError = refreshServersFirst;
+    Object? lastError;
+
+    while (true) {
+      final orderedServers = await _orderedServersForFailover(servers);
+      for (final server in orderedServers) {
+        if (!_hasRequiredServerCredentials(server)) {
+          lastError = Exception(
+              'Credenciais Xtream nao encontradas para este servidor.');
+          continue;
+        }
+
+        try {
+          final liveCatalog = await _fetchLiveCatalogForServer(server);
+          await selectActiveServer(server);
+          final secondaryCatalogs = await Future.wait([
+            _fetchCatalogOrEmpty(
+              () => _fetchMoviesCatalogForServer(server),
+              emptyLabel: 'Todos os Filmes',
+            ),
+            _fetchCatalogOrEmpty(
+              () => _fetchSeriesCatalogForServer(server),
+              emptyLabel: 'Todas as Series',
+            ),
+          ]);
+          return IptvHomeCatalogs(
+            server: server,
+            live: liveCatalog,
+            movies: secondaryCatalogs[0],
+            series: secondaryCatalogs[1],
+          );
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (triedRefreshAfterError) {
+        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+      }
+
+      triedRefreshAfterError = true;
+      await _tryRefreshSavedSession(deviceId: deviceId);
+      final refreshedServers = await getSavedServers();
+      if (refreshedServers.isEmpty) {
+        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+      }
+      servers = refreshedServers;
+    }
+  }
+
+  static Future<IptvCatalog> _fetchCatalogOrEmpty(
+    Future<IptvCatalog> Function() fetch, {
+    required String emptyLabel,
+  }) async {
+    try {
+      return await fetch();
+    } catch (_) {
+      return IptvCatalog(
+        categories: [CategoryOption(id: 'todos', label: emptyLabel)],
+        items: const [],
+      );
+    }
+  }
+
+  static Future<bool> refreshSavedSession({
+    String deviceId = '',
+    bool logoutOnRevoked = true,
+  }) async {
+    final normalizedDeviceId = _stringValue(deviceId);
+    if (normalizedDeviceId.isEmpty) {
+      return false;
+    }
+
+    final response = await http
+        .post(
+          Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Device-Id': normalizedDeviceId,
+          },
+          body: jsonEncode({'deviceId': normalizedDeviceId}),
+        )
+        .timeout(_sessionValidationTimeout);
+
+    final decoded = _decodeObject(response.body);
+    if (response.statusCode == 200 && decoded['success'] == true) {
+      await _saveSessionPayload(decoded);
+      return true;
+    }
+
+    final code = _stringValue(decoded['code']);
+    final error = _stringValue(decoded['error']);
+    if (logoutOnRevoked &&
+        _isSessionRevokedResponse(response.statusCode, code, error)) {
+      await logout();
+    }
+    return false;
+  }
+
+  static Future<void> _tryRefreshSavedSession({String deviceId = ''}) async {
+    try {
+      await refreshSavedSession(
+        deviceId: deviceId,
+        logoutOnRevoked: false,
+      );
+    } catch (_) {
+      // Catalog failover can still use the last saved server list.
+    }
+  }
+
   static Future<IptvCatalog> fetchLiveCatalog() async {
     final server = await _requireActiveServer();
+    return _fetchLiveCatalogForServer(server);
+  }
+
+  static Future<IptvCatalog> _fetchLiveCatalogForServer(
+    IptvServer server,
+  ) async {
     final categoriesData = await _fetchLiveProxy(server, 'categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
@@ -413,6 +560,12 @@ class ApiService {
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
     final server = await _requireActiveServer();
+    return _fetchMoviesCatalogForServer(server);
+  }
+
+  static Future<IptvCatalog> _fetchMoviesCatalogForServer(
+    IptvServer server,
+  ) async {
     final categoriesData = await _fetchXtream(server, 'get_vod_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
@@ -570,6 +723,12 @@ class ApiService {
 
   static Future<IptvCatalog> fetchSeriesCatalog() async {
     final server = await _requireActiveServer();
+    return _fetchSeriesCatalogForServer(server);
+  }
+
+  static Future<IptvCatalog> _fetchSeriesCatalogForServer(
+    IptvServer server,
+  ) async {
     final categoriesData = await _fetchXtream(server, 'get_series_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
@@ -928,6 +1087,23 @@ class ApiService {
     return license != null && _sessionExpiryDate(license) != null;
   }
 
+  static bool _isSessionRevokedResponse(
+    int statusCode,
+    String code,
+    String error,
+  ) {
+    final lowerError = error.toLowerCase();
+    return statusCode == 401 ||
+        statusCode == 403 ||
+        code == 'DEVICE_NOT_LINKED' ||
+        code == 'DEVICE_AMBIGUOUS' ||
+        code == 'LICENSE_EXPIRED' ||
+        (lowerError.contains('licen') && lowerError.contains('expirada')) ||
+        lowerError.contains('bloqueada') ||
+        lowerError.contains('inativa') ||
+        lowerError.contains('cancelada');
+  }
+
   static bool _isLicensePayloadActive(Map<String, dynamic> license) {
     final status = _stringValue(license['status']).toUpperCase();
     if (status.isNotEmpty && !const {'ACTIVE', 'TRIAL'}.contains(status)) {
@@ -1207,12 +1383,46 @@ class ApiService {
     if (server == null) {
       throw Exception('Servidor nao configurado. Faca login novamente.');
     }
-    if (server.baseUrl.isEmpty ||
-        server.username.isEmpty ||
-        server.password.isEmpty) {
+    if (!_hasRequiredServerCredentials(server)) {
       throw Exception('Credenciais Xtream nao encontradas para este servidor.');
     }
     return server;
+  }
+
+  static bool _hasRequiredServerCredentials(IptvServer server) {
+    return server.baseUrl.isNotEmpty &&
+        server.username.isNotEmpty &&
+        server.password.isNotEmpty;
+  }
+
+  static Future<List<IptvServer>> _orderedServersForFailover(
+    List<IptvServer> servers,
+  ) async {
+    final active = await getActiveServer();
+    if (active == null) {
+      return servers;
+    }
+
+    final ordered = <IptvServer>[];
+    for (final server in servers) {
+      if (_isSameServer(server, active)) {
+        ordered.add(server);
+        break;
+      }
+    }
+    for (final server in servers) {
+      if (!ordered.any((item) => _isSameServer(item, server))) {
+        ordered.add(server);
+      }
+    }
+    return ordered;
+  }
+
+  static bool _isSameServer(IptvServer a, IptvServer b) {
+    if (a.id.isNotEmpty && b.id.isNotEmpty) {
+      return a.id == b.id;
+    }
+    return a.cleanBaseUrl == b.cleanBaseUrl;
   }
 
   static Future<List<Map<String, dynamic>>> _fetchLiveProxy(
