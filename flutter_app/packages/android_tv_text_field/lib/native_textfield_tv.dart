@@ -147,6 +147,13 @@ class _NativeTextFieldState extends State<NativeTextField> {
     await _channel.invokeMethod('clearFocus', {'instanceId': _instanceId});
   }
 
+  Future<void> setHint(String? hint) async {
+    await _channel.invokeMethod(
+      'setHint',
+      {'instanceId': _instanceId, 'hint': hint ?? ''},
+    );
+  }
+
   Future<void> moveCursorLeft() async {
     await _channel.invokeMethod(
         'moveCursor', {'instanceId': _instanceId, 'direction': 'left'});
@@ -286,6 +293,14 @@ class _DpadNativeTextFieldState extends State<AndroidTVTextField> {
   void _openKeyboard() {
     _nativeFieldFocused = true;
     _nativeTextFieldKey.currentState?.requestFocus();
+  }
+
+  @override
+  void didUpdateWidget(covariant AndroidTVTextField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.hint != widget.hint) {
+      _nativeTextFieldKey.currentState?.setHint(widget.hint);
+    }
   }
 
   bool _isOkKey(KeyEvent event) {

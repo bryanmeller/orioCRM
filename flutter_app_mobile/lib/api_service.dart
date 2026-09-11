@@ -57,6 +57,7 @@ class CategoryOption {
 
 class IptvContentItem {
   final String id;
+  final String epgChannelId;
   final String title;
   final String subtitle;
   final String category;
@@ -74,6 +75,7 @@ class IptvContentItem {
 
   const IptvContentItem({
     required this.id,
+    this.epgChannelId = '',
     required this.title,
     required this.subtitle,
     required this.category,
@@ -96,6 +98,20 @@ class IptvCatalog {
   final List<IptvContentItem> items;
 
   const IptvCatalog({required this.categories, required this.items});
+}
+
+class IptvHomeCatalogs {
+  final IptvServer server;
+  final IptvCatalog live;
+  final IptvCatalog movies;
+  final IptvCatalog series;
+
+  const IptvHomeCatalogs({
+    required this.server,
+    required this.live,
+    required this.movies,
+    required this.series,
+  });
 }
 
 class ContinueWatchingItem {
@@ -155,9 +171,14 @@ class _LiveProgram {
 
 class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
+  static const Duration _loginTimeout = Duration(seconds: 30);
+  static const Duration _sessionValidationTimeout = Duration(seconds: 12);
+  static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
+  static const Duration _liveNowNextRefreshInterval = Duration(hours: 20);
   static const String _parentalPinKey = 'parental_control_pin';
   static const String _adultContentBlockedKey = 'adult_content_blocked';
   static const String _defaultParentalPin = '1234';
+  static const String _liveNowNextCachePrefix = 'live_now_next_epg_cache_v1';
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -187,34 +208,11 @@ class ApiService {
             'deviceInfo': deviceInfo,
           }),
         )
-        .timeout(_requestTimeout);
+        .timeout(_loginTimeout);
 
     final decoded = _decodeObject(response.body);
     if (response.statusCode == 200) {
-      final prefs = await SharedPreferences.getInstance();
-
-      if (decoded['user'] != null) {
-        await prefs.setString('user_data', jsonEncode(decoded['user']));
-      }
-
-      if (decoded['license'] != null) {
-        await prefs.setString('license_data', jsonEncode(decoded['license']));
-      }
-
-      if (decoded['servers'] != null) {
-        await prefs.setString('servers_data', jsonEncode(decoded['servers']));
-      }
-
-      final token = _stringValue(
-        decoded['token'] ??
-            decoded['authToken'] ??
-            decoded['access_token'] ??
-            decoded['sessionToken'],
-      );
-      await prefs.setString(
-        'auth_token',
-        token.isNotEmpty ? token : 'authenticated',
-      );
+      await _saveSessionPayload(decoded);
 
       return decoded;
     }
@@ -319,8 +317,141 @@ class ApiService {
     await prefs.setString('selected_server_name', server.name);
   }
 
+  static Future<IptvHomeCatalogs> fetchHomeCatalogsWithFailover({
+    String deviceId = '',
+    bool refreshServersFirst = false,
+  }) async {
+    if (refreshServersFirst) {
+      await _tryRefreshSavedSession(deviceId: deviceId);
+    }
+
+    var servers = await getSavedServers();
+    if (servers.isEmpty) {
+      await _tryRefreshSavedSession(deviceId: deviceId);
+      servers = await getSavedServers();
+    }
+    if (servers.isEmpty) {
+      throw Exception('Servidor nao configurado. Faca login novamente.');
+    }
+
+    var triedRefreshAfterError = refreshServersFirst;
+    Object? lastError;
+
+    while (true) {
+      final orderedServers = await _orderedServersForFailover(servers);
+      for (final server in orderedServers) {
+        if (!_hasRequiredServerCredentials(server)) {
+          lastError = Exception(
+              'Credenciais Xtream nao encontradas para este servidor.');
+          continue;
+        }
+
+        try {
+          final liveCatalog = await _fetchLiveCatalogForServer(server);
+          await selectActiveServer(server);
+          final secondaryCatalogs = await Future.wait([
+            _fetchCatalogOrEmpty(
+              () => _fetchMoviesCatalogForServer(server),
+              emptyLabel: 'Todos os Filmes',
+            ),
+            _fetchCatalogOrEmpty(
+              () => _fetchSeriesCatalogForServer(server),
+              emptyLabel: 'Todas as Series',
+            ),
+          ]);
+          return IptvHomeCatalogs(
+            server: server,
+            live: liveCatalog,
+            movies: secondaryCatalogs[0],
+            series: secondaryCatalogs[1],
+          );
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (triedRefreshAfterError) {
+        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+      }
+
+      triedRefreshAfterError = true;
+      await _tryRefreshSavedSession(deviceId: deviceId);
+      final refreshedServers = await getSavedServers();
+      if (refreshedServers.isEmpty) {
+        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+      }
+      servers = refreshedServers;
+    }
+  }
+
+  static Future<IptvCatalog> _fetchCatalogOrEmpty(
+    Future<IptvCatalog> Function() fetch, {
+    required String emptyLabel,
+  }) async {
+    try {
+      return await fetch();
+    } catch (_) {
+      return IptvCatalog(
+        categories: [CategoryOption(id: 'todos', label: emptyLabel)],
+        items: const [],
+      );
+    }
+  }
+
+  static Future<bool> refreshSavedSession({
+    String deviceId = '',
+    bool logoutOnRevoked = true,
+  }) async {
+    final normalizedDeviceId = _stringValue(deviceId);
+    if (normalizedDeviceId.isEmpty) {
+      return false;
+    }
+
+    final response = await http
+        .post(
+          Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Device-Id': normalizedDeviceId,
+          },
+          body: jsonEncode({'deviceId': normalizedDeviceId}),
+        )
+        .timeout(_sessionValidationTimeout);
+
+    final decoded = _decodeObject(response.body);
+    if (response.statusCode == 200 && decoded['success'] == true) {
+      await _saveSessionPayload(decoded);
+      return true;
+    }
+
+    final code = _stringValue(decoded['code']);
+    final error = _stringValue(decoded['error']);
+    if (logoutOnRevoked &&
+        _isSessionRevokedResponse(response.statusCode, code, error)) {
+      await logout();
+    }
+    return false;
+  }
+
+  static Future<void> _tryRefreshSavedSession({String deviceId = ''}) async {
+    try {
+      await refreshSavedSession(
+        deviceId: deviceId,
+        logoutOnRevoked: false,
+      );
+    } catch (_) {
+      // Catalog failover can still use the last saved server list.
+    }
+  }
+
   static Future<IptvCatalog> fetchLiveCatalog() async {
     final server = await _requireActiveServer();
+    return _fetchLiveCatalogForServer(server);
+  }
+
+  static Future<IptvCatalog> _fetchLiveCatalogForServer(
+    IptvServer server,
+  ) async {
     final categoriesData = await _fetchLiveProxy(server, 'categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
@@ -359,6 +490,13 @@ class ApiService {
 
       return IptvContentItem(
         id: streamId.isNotEmpty ? streamId : 'live-$index',
+        epgChannelId: _stringValue(
+          item['epg_channel_id'] ??
+              item['epgChannelId'] ??
+              item['epg_id'] ??
+              item['xmltv_id'] ??
+              item['tvguide_id'],
+        ),
         title: _stringValue(item['name'] ?? item['stream_name'],
             fallback: 'Canal sem Nome'),
         subtitle: _formatProgramNow(item),
@@ -377,21 +515,57 @@ class ApiService {
       );
     }).toList();
 
-    return IptvCatalog(categories: categories, items: items);
+    final cachedItems = await _applyCachedCentralLiveEpg(server, items);
+    return IptvCatalog(categories: categories, items: cachedItems);
   }
 
   static Future<List<IptvContentItem>> fetchLiveEpgItems(
-    List<IptvContentItem> items,
-  ) async {
+    List<IptvContentItem> items, {
+    bool useXtreamFallback = true,
+  }) async {
     if (items.isEmpty) {
       return const [];
     }
     final server = await _requireActiveServer();
-    return _attachLiveEpg(server, items);
+    final cachedItems = await _applyCachedCentralLiveEpg(server, items);
+    if (cachedItems.every((item) => item.liveEpgChecked)) {
+      return cachedItems;
+    }
+    return _attachLiveEpg(
+      server,
+      cachedItems,
+      useXtreamFallback: useXtreamFallback,
+    );
+  }
+
+  static Future<List<IptvContentItem>> refreshLiveEpgCache(
+    List<IptvContentItem> items, {
+    bool force = false,
+  }) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    final server = await _requireActiveServer();
+    final cachedItems = await _applyCachedCentralLiveEpg(server, items);
+    final hasPendingItems = cachedItems.any((item) => !item.liveEpgChecked);
+    if (!force &&
+        !hasPendingItems &&
+        !await _shouldRefreshCentralLiveEpg(server)) {
+      return cachedItems;
+    }
+
+    return _attachCentralLiveEpg(server, cachedItems);
   }
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
     final server = await _requireActiveServer();
+    return _fetchMoviesCatalogForServer(server);
+  }
+
+  static Future<IptvCatalog> _fetchMoviesCatalogForServer(
+    IptvServer server,
+  ) async {
     final categoriesData = await _fetchXtream(server, 'get_vod_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
@@ -445,8 +619,116 @@ class ApiService {
     return IptvCatalog(categories: categories, items: items);
   }
 
+  static Future<IptvContentItem> fetchMovieDetails(
+    IptvContentItem movie,
+  ) async {
+    final server = await _requireActiveServer();
+    final uri = Uri.parse(
+      '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_vod_info&vod_id=${Uri.encodeQueryComponent(movie.id)}',
+    );
+    final response = await http.get(
+      uri,
+      headers: const {
+        'Accept': 'application/json, text/plain, */*',
+        'User-Agent': 'IPTVSmartersPro/1.0 (Linux; Android 10)',
+      },
+    ).timeout(_requestTimeout);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+    }
+
+    final decoded = _decodeObject(response.body);
+    final rawInfo = decoded['info'];
+    final rawMovieData = decoded['movie_data'];
+    final info = rawInfo is Map
+        ? Map<String, dynamic>.from(rawInfo)
+        : <String, dynamic>{};
+    final movieData = rawMovieData is Map
+        ? Map<String, dynamic>.from(rawMovieData)
+        : <String, dynamic>{};
+    final merged = <String, dynamic>{
+      ...decoded,
+      ...movieData,
+      ...info,
+    };
+    final imageUrl = _imageUrl(merged, server);
+    final rating = _rating(merged);
+    final description = _firstNonEmptyString([
+      info['plot'],
+      info['description'],
+      info['overview'],
+      info['plot_long'],
+      info['movie_description'],
+      info['o_description'],
+      movieData['plot'],
+      movieData['description'],
+      movieData['overview'],
+      movieData['plot_long'],
+      decoded['plot'],
+      decoded['description'],
+      decoded['overview'],
+      decoded['plot_long'],
+      movie.description,
+    ]);
+
+    final year = _stringValue(info['releasedate']).isNotEmpty
+        ? _stringValue(info['releasedate']).split('-').first
+        : _stringValue(info['release_date']).isNotEmpty
+            ? _stringValue(info['release_date']).split('-').first
+            : _stringValue(info['year'], fallback: movie.year ?? '');
+    final ext = _stringValue(
+      movieData['container_extension'] ?? info['container_extension'],
+      fallback: 'mp4',
+    );
+    var streamUrl = _stringValue(
+      movieData['streamUrl'] ??
+          movieData['url'] ??
+          movieData['direct_source'] ??
+          info['streamUrl'] ??
+          info['url'] ??
+          info['direct_source'],
+      fallback: movie.streamUrl,
+    );
+    if (streamUrl.isEmpty && movie.id.isNotEmpty) {
+      streamUrl =
+          '${server.cleanBaseUrl}/movie/${server.encodedUsername}/${server.encodedPassword}/${movie.id}.$ext';
+    }
+
+    return IptvContentItem(
+      id: movie.id,
+      epgChannelId: movie.epgChannelId,
+      title: _stringValue(
+        movieData['name'] ??
+            info['name'] ??
+            movieData['title'] ??
+            info['title'],
+        fallback: movie.title,
+      ),
+      subtitle: [
+        if (year.isNotEmpty) year,
+        movie.category,
+      ].join(' - '),
+      category: movie.category,
+      categoryId: movie.categoryId,
+      streamUrl: streamUrl,
+      alternateStreamUrls: movie.alternateStreamUrls,
+      imageUrl: imageUrl.isNotEmpty ? imageUrl : movie.imageUrl,
+      type: movie.type,
+      rating: rating.isNotEmpty ? rating : movie.rating,
+      year: year.isNotEmpty ? year : movie.year,
+      description: description,
+    );
+  }
+
   static Future<IptvCatalog> fetchSeriesCatalog() async {
     final server = await _requireActiveServer();
+    return _fetchSeriesCatalogForServer(server);
+  }
+
+  static Future<IptvCatalog> _fetchSeriesCatalogForServer(
+    IptvServer server,
+  ) async {
     final categoriesData = await _fetchXtream(server, 'get_series_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
@@ -645,10 +927,214 @@ class ApiService {
   }
 
   static Future<bool> hasSavedSession() async {
+    return isSavedSessionLocallyValid();
+  }
+
+  static Future<bool> isSavedSessionLocallyValid() async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('auth_token') ?? '';
     final servers = prefs.getString('servers_data') ?? '';
-    return token.isNotEmpty || servers.isNotEmpty;
+    if (token.isEmpty && servers.isEmpty) {
+      return false;
+    }
+
+    final license = _savedLicenseData(prefs);
+    if (license == null) {
+      return true;
+    }
+
+    if (!_isLicensePayloadActive(license)) {
+      await logout();
+      return false;
+    }
+
+    return true;
+  }
+
+  static Future<bool> validateSavedSession({
+    String? deviceId,
+    bool revalidateWithServer = false,
+  }) async {
+    final localValid = await isSavedSessionLocallyValid();
+    if (!localValid) {
+      return false;
+    }
+
+    if (!revalidateWithServer ||
+        _stringValue(deviceId).isEmpty ||
+        !await _shouldRevalidateWithDeviceLogin()) {
+      return true;
+    }
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Device-Id': _stringValue(deviceId),
+            },
+            body: jsonEncode({'deviceId': deviceId}),
+          )
+          .timeout(_sessionValidationTimeout);
+
+      final decoded = _decodeObject(response.body);
+      if (response.statusCode == 200 && decoded['success'] == true) {
+        await _saveSessionPayload(decoded);
+        return isSavedSessionLocallyValid();
+      }
+
+      final code = _stringValue(decoded['code']);
+      final error = _stringValue(decoded['error']);
+      if (response.statusCode == 401 ||
+          response.statusCode == 403 ||
+          code == 'DEVICE_NOT_LINKED' ||
+          code == 'DEVICE_AMBIGUOUS' ||
+          code == 'LICENSE_EXPIRED' ||
+          error.toLowerCase().contains('licença expirada') ||
+          error.toLowerCase().contains('licenca expirada') ||
+          error.toLowerCase().contains('bloqueada') ||
+          error.toLowerCase().contains('inativa') ||
+          error.toLowerCase().contains('cancelada')) {
+        await logout();
+        return false;
+      }
+
+      return localValid;
+    } catch (_) {
+      return localValid;
+    }
+  }
+
+  static Future<void> _saveSessionPayload(Map<String, dynamic> decoded) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (decoded['user'] != null) {
+      await prefs.setString('user_data', jsonEncode(decoded['user']));
+    }
+
+    if (decoded['license'] != null) {
+      await prefs.setString('license_data', jsonEncode(decoded['license']));
+    }
+
+    if (decoded['servers'] != null) {
+      await prefs.setString('servers_data', jsonEncode(decoded['servers']));
+    }
+
+    final token = _stringValue(
+      decoded['token'] ??
+          decoded['authToken'] ??
+          decoded['access_token'] ??
+          decoded['sessionToken'],
+    );
+    await prefs.setString(
+      'auth_token',
+      token.isNotEmpty ? token : 'authenticated',
+    );
+  }
+
+  static Map<String, dynamic>? _savedLicenseData(SharedPreferences prefs) {
+    final rawLicense = prefs.getString('license_data') ?? '';
+    if (rawLicense.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(rawLicense);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  static Map<String, dynamic>? _savedUserData(SharedPreferences prefs) {
+    final rawUser = prefs.getString('user_data') ?? '';
+    if (rawUser.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(rawUser);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  static Future<bool> _shouldRevalidateWithDeviceLogin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final user = _savedUserData(prefs);
+    final license = _savedLicenseData(prefs);
+
+    final role = _stringValue(user?['role']).toUpperCase();
+    final providerCode = _stringValue(
+      user?['provider_code'] ?? user?['providerCode'],
+    );
+    if (role == 'PROVIDER' || providerCode.isNotEmpty) {
+      return false;
+    }
+
+    return license != null && _sessionExpiryDate(license) != null;
+  }
+
+  static bool _isSessionRevokedResponse(
+    int statusCode,
+    String code,
+    String error,
+  ) {
+    final lowerError = error.toLowerCase();
+    return statusCode == 401 ||
+        statusCode == 403 ||
+        code == 'DEVICE_NOT_LINKED' ||
+        code == 'DEVICE_AMBIGUOUS' ||
+        code == 'LICENSE_EXPIRED' ||
+        (lowerError.contains('licen') && lowerError.contains('expirada')) ||
+        lowerError.contains('bloqueada') ||
+        lowerError.contains('inativa') ||
+        lowerError.contains('cancelada');
+  }
+
+  static bool _isLicensePayloadActive(Map<String, dynamic> license) {
+    final status = _stringValue(license['status']).toUpperCase();
+    if (status.isNotEmpty && !const {'ACTIVE', 'TRIAL'}.contains(status)) {
+      return false;
+    }
+
+    final expiresAt = _sessionExpiryDate(license);
+    if (expiresAt == null) {
+      return true;
+    }
+
+    return expiresAt.isAfter(DateTime.now());
+  }
+
+  static DateTime? _sessionExpiryDate(Map<String, dynamic> license) {
+    for (final key in [
+      'expires_at',
+      'valid_until',
+      'validUntil',
+      'expiresAt',
+    ]) {
+      final value = _stringValue(license[key]);
+      if (value.isEmpty) {
+        continue;
+      }
+      final parsed = DateTime.tryParse(value.replaceFirst(' ', 'T'));
+      if (parsed != null) {
+        return parsed.toLocal();
+      }
+    }
+    return null;
   }
 
   static Future<bool> isAdultContentBlocked() async {
@@ -897,12 +1383,46 @@ class ApiService {
     if (server == null) {
       throw Exception('Servidor nao configurado. Faca login novamente.');
     }
-    if (server.baseUrl.isEmpty ||
-        server.username.isEmpty ||
-        server.password.isEmpty) {
+    if (!_hasRequiredServerCredentials(server)) {
       throw Exception('Credenciais Xtream nao encontradas para este servidor.');
     }
     return server;
+  }
+
+  static bool _hasRequiredServerCredentials(IptvServer server) {
+    return server.baseUrl.isNotEmpty &&
+        server.username.isNotEmpty &&
+        server.password.isNotEmpty;
+  }
+
+  static Future<List<IptvServer>> _orderedServersForFailover(
+    List<IptvServer> servers,
+  ) async {
+    final active = await getActiveServer();
+    if (active == null) {
+      return servers;
+    }
+
+    final ordered = <IptvServer>[];
+    for (final server in servers) {
+      if (_isSameServer(server, active)) {
+        ordered.add(server);
+        break;
+      }
+    }
+    for (final server in servers) {
+      if (!ordered.any((item) => _isSameServer(item, server))) {
+        ordered.add(server);
+      }
+    }
+    return ordered;
+  }
+
+  static bool _isSameServer(IptvServer a, IptvServer b) {
+    if (a.id.isNotEmpty && b.id.isNotEmpty) {
+      return a.id == b.id;
+    }
+    return a.cleanBaseUrl == b.cleanBaseUrl;
   }
 
   static Future<List<Map<String, dynamic>>> _fetchLiveProxy(
@@ -985,25 +1505,478 @@ class ApiService {
 
   static Future<List<IptvContentItem>> _attachLiveEpg(
     IptvServer server,
-    List<IptvContentItem> items,
-  ) async {
-    const batchSize = 10;
-    final result = List<IptvContentItem>.from(items);
+    List<IptvContentItem> items, {
+    required bool useXtreamFallback,
+  }) async {
+    final centralResult = await _attachCentralLiveEpg(server, items);
+    final pendingItems = centralResult
+        .asMap()
+        .entries
+        .where((entry) => !entry.value.liveEpgChecked)
+        .toList();
+    if (pendingItems.isEmpty) {
+      return centralResult;
+    }
+    if (!useXtreamFallback) {
+      final result = List<IptvContentItem>.from(centralResult);
+      for (final entry in pendingItems) {
+        result[entry.key] = _itemWithoutLiveEpg(entry.value);
+      }
+      return result;
+    }
 
-    for (var start = 0; start < result.length; start += batchSize) {
-      final end = (start + batchSize).clamp(0, result.length);
+    const batchSize = 10;
+    final result = List<IptvContentItem>.from(centralResult);
+
+    for (var start = 0; start < pendingItems.length; start += batchSize) {
+      final end = (start + batchSize).clamp(0, pendingItems.length);
       final updates = await Future.wait(
         [
           for (var index = start; index < end; index++)
-            _itemWithShortEpg(server, result[index]),
+            _itemWithShortEpg(server, pendingItems[index].value),
         ],
       );
       for (var offset = 0; offset < updates.length; offset++) {
-        result[start + offset] = updates[offset];
+        result[pendingItems[start + offset].key] = updates[offset];
       }
     }
 
     return result;
+  }
+
+  static IptvContentItem _itemWithoutLiveEpg(IptvContentItem item) {
+    final currentLabel =
+        item.subtitle == 'Buscando EPG...' ? 'EPG indisponivel' : item.subtitle;
+    final fallbackNextShowing = item.nextShowing ?? '';
+    final nextLabel = fallbackNextShowing == 'Aguardando EPG...'
+        ? 'Sem dados do EPG'
+        : fallbackNextShowing;
+
+    return _copyLiveItemWithEpg(
+      item,
+      subtitle: currentLabel,
+      nextShowing: nextLabel,
+      liveEpgChecked: true,
+    );
+  }
+
+  static Future<List<IptvContentItem>> _attachCentralLiveEpg(
+    IptvServer server,
+    List<IptvContentItem> items,
+  ) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    const batchSize = 120;
+    final result = List<IptvContentItem>.from(items);
+
+    for (var start = 0; start < result.length; start += batchSize) {
+      final end = (start + batchSize).clamp(0, result.length);
+      final batch = result.sublist(start, end);
+      final epgByChannel = await _fetchCentralNowNext(batch);
+      if (epgByChannel.isEmpty) {
+        continue;
+      }
+      await _saveCentralLiveEpgCache(server, epgByChannel);
+
+      for (var offset = 0; offset < batch.length; offset++) {
+        final item = batch[offset];
+        final epg = _epgForItem(item, epgByChannel);
+        if (epg != null) {
+          result[start + offset] = _itemWithNowNextEpg(item, epg);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  static Future<List<IptvContentItem>> _applyCachedCentralLiveEpg(
+    IptvServer server,
+    List<IptvContentItem> items,
+  ) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    final cached = await _readCentralLiveEpgCache(server);
+    final epgByChannel = cached.$1;
+    final savedAt = cached.$2;
+    if (epgByChannel.isEmpty || savedAt == null) {
+      return items;
+    }
+
+    return items.map((item) {
+      if (item.liveEpgChecked) {
+        return item;
+      }
+      final epg = _epgForItem(item, epgByChannel);
+      if (epg == null || !_cachedNowNextIsUsable(epg, savedAt)) {
+        return item;
+      }
+      return _itemWithNowNextEpg(item, epg);
+    }).toList();
+  }
+
+  static Future<bool> _shouldRefreshCentralLiveEpg(IptvServer server) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_centralLiveEpgCacheKey(server));
+    if (raw == null || raw.isEmpty) {
+      return true;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return true;
+      }
+      final updatedAt = _intValue(decoded['updatedAt']);
+      if (updatedAt <= 0) {
+        return true;
+      }
+      final age = DateTime.now().difference(
+        DateTime.fromMillisecondsSinceEpoch(updatedAt),
+      );
+      return age >= _liveNowNextRefreshInterval;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  static Future<(Map<String, Map<String, dynamic>>, DateTime?)>
+      _readCentralLiveEpgCache(IptvServer server) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_centralLiveEpgCacheKey(server));
+    if (raw == null || raw.isEmpty) {
+      return (<String, Map<String, dynamic>>{}, null);
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return (<String, Map<String, dynamic>>{}, null);
+      }
+      final updatedAt = _intValue(decoded['updatedAt']);
+      final data = decoded['data'];
+      if (updatedAt <= 0 || data is! Map) {
+        return (<String, Map<String, dynamic>>{}, null);
+      }
+
+      final result = <String, Map<String, dynamic>>{};
+      for (final entry in data.entries) {
+        final key = _stringValue(entry.key);
+        final value = entry.value;
+        if (key.isNotEmpty && value is Map) {
+          result[key] = Map<String, dynamic>.from(value);
+        }
+      }
+      return (result, DateTime.fromMillisecondsSinceEpoch(updatedAt));
+    } catch (_) {
+      return (<String, Map<String, dynamic>>{}, null);
+    }
+  }
+
+  static Future<void> _saveCentralLiveEpgCache(
+    IptvServer server,
+    Map<String, Map<String, dynamic>> freshData,
+  ) async {
+    if (freshData.isEmpty) {
+      return;
+    }
+
+    final cached = await _readCentralLiveEpgCache(server);
+    final merged = Map<String, Map<String, dynamic>>.from(cached.$1);
+    merged.addAll(freshData);
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _centralLiveEpgCacheKey(server),
+      jsonEncode({
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        'data': merged,
+      }),
+    );
+  }
+
+  static bool _cachedNowNextIsUsable(
+    Map<String, dynamic> epg,
+    DateTime savedAt,
+  ) {
+    final age = DateTime.now().difference(savedAt);
+    if (age > _liveNowNextCacheMaxAge) {
+      return false;
+    }
+
+    final now = DateTime.now();
+    final current = _liveProgramFromNowNext(epg['current']);
+    if (current?.end != null && current!.end!.isAfter(now)) {
+      return true;
+    }
+
+    final next = _liveProgramFromNowNext(epg['next']);
+    if (next?.start != null && next!.start!.isAfter(now)) {
+      return true;
+    }
+
+    return current != null &&
+        current.end == null &&
+        age < const Duration(hours: 4);
+  }
+
+  static String _centralLiveEpgCacheKey(IptvServer server) {
+    final serverKey = server.id.isNotEmpty ? server.id : server.cleanBaseUrl;
+    return '$_liveNowNextCachePrefix:$serverKey';
+  }
+
+  static Future<Map<String, Map<String, dynamic>>> _fetchCentralNowNext(
+    List<IptvContentItem> items,
+  ) async {
+    final channelIds = items
+        .expand(_epgLookupIds)
+        .where((id) => id.trim().isNotEmpty)
+        .toSet()
+        .toList();
+    final channels = items.map(_epgLookupChannel).toList();
+    if (channelIds.isEmpty && channels.isEmpty) {
+      return const {};
+    }
+
+    try {
+      final headers = await _epgRequestHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/epg/now-next'),
+            headers: headers,
+            body: jsonEncode({
+              'channelIds': channelIds,
+              'channels': channels,
+            }),
+          )
+          .timeout(const Duration(seconds: 7));
+
+      final decoded = _decodeObject(response.body);
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300 ||
+          decoded['success'] != true) {
+        return const {};
+      }
+
+      final data = decoded['data'];
+      final result = <String, Map<String, dynamic>>{};
+      if (data is List) {
+        for (var index = 0;
+            index < data.length && index < channels.length;
+            index++) {
+          final item = data[index];
+          if (item is! Map) {
+            continue;
+          }
+          final epg = Map<String, dynamic>.from(item);
+          for (final channelId in _epgStructuredRequestIds(channels[index])) {
+            result[channelId] = epg;
+          }
+          for (final channelId in _epgResponseIds(epg)) {
+            result[channelId] = epg;
+          }
+        }
+        return result;
+      }
+
+      if (data is Map) {
+        for (final entry in data.entries) {
+          final item = entry.value;
+          if (item is! Map) {
+            continue;
+          }
+          final epg = Map<String, dynamic>.from(item);
+          final entryKey = _stringValue(entry.key);
+          if (entryKey.isNotEmpty) {
+            result[entryKey] = epg;
+          }
+          for (final channelId in _epgResponseIds(epg)) {
+            result[channelId] = epg;
+          }
+        }
+        return result;
+      }
+
+      return const {};
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  static List<String> _epgResponseIds(Map<String, dynamic> epg) {
+    return [
+      epg['channelId'],
+      epg['id'],
+      epg['epgChannelId'],
+      epg['name'],
+      epg['requestName'],
+      epg['matchedChannelId'],
+      epg['globalChannelId'],
+      epg['matchedName'],
+    ].map(_stringValue).where((id) => id.trim().isNotEmpty).toSet().toList();
+  }
+
+  static Future<Map<String, String>> _epgRequestHeaders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token') ?? '';
+    final serverId = prefs.getString('selected_server_id') ?? '';
+    return {
+      'Content-Type': 'application/json',
+      if (token.isNotEmpty && token != 'authenticated')
+        'Authorization': 'Bearer $token',
+      if (serverId.isNotEmpty) 'X-Server-Id': serverId,
+    };
+  }
+
+  static Map<String, dynamic> _epgLookupChannel(IptvContentItem item) {
+    final streamId = item.id.trim();
+    final epgChannelId = item.epgChannelId.trim();
+    final channelId = epgChannelId.isNotEmpty ? epgChannelId : streamId;
+    return {
+      if (channelId.isNotEmpty) 'channelId': channelId,
+      'name': item.title,
+      if (streamId.isNotEmpty) 'streamId': int.tryParse(streamId) ?? streamId,
+      if (epgChannelId.isNotEmpty) 'epgChannelId': epgChannelId,
+      'cleanName': _cleanEpgChannelName(item.title),
+    };
+  }
+
+  static List<String> _epgStructuredRequestIds(Map<String, dynamic> channel) {
+    return [
+      channel['channelId'],
+      channel['streamId'],
+      channel['name'],
+      channel['cleanName'],
+      channel['epgChannelId'],
+    ].map(_stringValue).where((id) => id.trim().isNotEmpty).toSet().toList();
+  }
+
+  static List<String> _epgLookupIds(IptvContentItem item) {
+    return [
+      if (_isSafeEpgChannelId(item)) item.epgChannelId,
+      item.id,
+      item.title,
+      _cleanEpgChannelName(item.title),
+    ].where((id) => id.trim().isNotEmpty).toSet().toList();
+  }
+
+  static bool _isSafeEpgChannelId(IptvContentItem item) {
+    final epgChannelId = item.epgChannelId.trim();
+    if (epgChannelId.isEmpty) {
+      return false;
+    }
+
+    final epgText = _normalizedEpgMatchText(epgChannelId);
+    final titleText = _normalizedEpgMatchText(item.title);
+    if (epgText.isEmpty || titleText.isEmpty) {
+      return false;
+    }
+
+    final epgTokens = _significantEpgTokens(epgText);
+    final titleTokens = _significantEpgTokens(titleText);
+    if (epgTokens.isEmpty || titleTokens.isEmpty) {
+      return false;
+    }
+
+    return epgTokens.any((token) => titleTokens.contains(token)) ||
+        titleTokens.any((token) => epgText.contains(token));
+  }
+
+  static Set<String> _significantEpgTokens(String value) {
+    const ignored = {
+      'canal',
+      'fhd',
+      'hd',
+      'h264',
+      'h265',
+      'hevc',
+      'sd',
+      'uhd',
+    };
+    return value
+        .split(' ')
+        .where((token) => token.length >= 4 && !ignored.contains(token))
+        .toSet();
+  }
+
+  static String _normalizedEpgMatchText(String value) {
+    return _cleanEpgChannelName(value)
+        .toLowerCase()
+        .replaceAll(RegExp(r'[áàãâä]'), 'a')
+        .replaceAll(RegExp(r'[éèêë]'), 'e')
+        .replaceAll(RegExp(r'[íìîï]'), 'i')
+        .replaceAll(RegExp(r'[óòõôö]'), 'o')
+        .replaceAll(RegExp(r'[úùûü]'), 'u')
+        .replaceAll('ç', 'c')
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static String _cleanEpgChannelName(String value) {
+    return value
+        .replaceAll(
+            RegExp(r'\b(FHD|HD|SD|H264|H265|HEVC|4K)\b', caseSensitive: false),
+            ' ')
+        .replaceAll(RegExp(r'[¹²³ºª°]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static Map<String, dynamic>? _epgForItem(
+    IptvContentItem item,
+    Map<String, Map<String, dynamic>> epgByChannel,
+  ) {
+    for (final id in _epgLookupIds(item)) {
+      final epg = epgByChannel[id];
+      if (epg != null && _hasNowNextData(epg)) {
+        return epg;
+      }
+    }
+    return null;
+  }
+
+  static bool _hasNowNextData(Map<String, dynamic> epg) {
+    return _liveProgramFromNowNext(epg['current']) != null ||
+        _liveProgramFromNowNext(epg['next']) != null;
+  }
+
+  static IptvContentItem _itemWithNowNextEpg(
+    IptvContentItem item,
+    Map<String, dynamic> epg,
+  ) {
+    final current = _liveProgramFromNowNext(epg['current']);
+    final next = _liveProgramFromNowNext(epg['next']);
+    final fallbackNextShowing = item.nextShowing ?? '';
+
+    return _copyLiveItemWithEpg(
+      item,
+      subtitle: current != null
+          ? _formatProgramLabel(current)
+          : item.subtitle == 'Buscando EPG...'
+              ? 'EPG indisponivel'
+              : item.subtitle,
+      nextShowing: next != null
+          ? _formatProgramLabel(next)
+          : fallbackNextShowing == 'Aguardando EPG...'
+              ? 'Sem dados do EPG'
+              : fallbackNextShowing,
+      liveEpgChecked: true,
+    );
+  }
+
+  static _LiveProgram? _liveProgramFromNowNext(dynamic data) {
+    if (data is! Map) {
+      return null;
+    }
+    final program = _liveProgramFromJson(Map<String, dynamic>.from(data));
+    return program.title.isEmpty || _isBrokenEpgText(program.title)
+        ? null
+        : program;
   }
 
   static Future<IptvContentItem> _itemWithShortEpg(
@@ -1015,24 +1988,14 @@ class ApiService {
       final currentLabel = item.subtitle == 'Buscando EPG...'
           ? 'EPG indisponivel'
           : item.subtitle;
-      final nextLabel = item.nextShowing == 'Aguardando EPG...'
+      final fallbackNextShowing = item.nextShowing ?? '';
+      final nextLabel = fallbackNextShowing == 'Aguardando EPG...'
           ? 'Sem dados do EPG'
-          : item.nextShowing;
-      return IptvContentItem(
-        id: item.id,
-        title: item.title,
+          : fallbackNextShowing;
+      return _copyLiveItemWithEpg(
+        item,
         subtitle: currentLabel,
-        category: item.category,
-        categoryId: item.categoryId,
-        streamUrl: item.streamUrl,
-        alternateStreamUrls: item.alternateStreamUrls,
-        imageUrl: item.imageUrl,
-        type: item.type,
         nextShowing: nextLabel,
-        rating: item.rating,
-        year: item.year,
-        description: item.description,
-        eventStartDateTime: item.eventStartDateTime,
         liveEpgChecked: true,
       );
     }
@@ -1072,8 +2035,23 @@ class ApiService {
         ? _formatProgramLabel(next)
         : _formatProgramNextFromItem(item);
 
+    return _copyLiveItemWithEpg(
+      item,
+      subtitle: subtitle,
+      nextShowing: nextShowing,
+      liveEpgChecked: true,
+    );
+  }
+
+  static IptvContentItem _copyLiveItemWithEpg(
+    IptvContentItem item, {
+    required String subtitle,
+    required String nextShowing,
+    required bool liveEpgChecked,
+  }) {
     return IptvContentItem(
       id: item.id,
+      epgChannelId: item.epgChannelId,
       title: item.title,
       subtitle: subtitle,
       category: item.category,
@@ -1087,7 +2065,7 @@ class ApiService {
       year: item.year,
       description: item.description,
       eventStartDateTime: item.eventStartDateTime,
-      liveEpgChecked: true,
+      liveEpgChecked: liveEpgChecked,
     );
   }
 
@@ -1100,13 +2078,13 @@ class ApiService {
     }
 
     final proxyPrograms = await _fetchShortEpgProxy(server, streamId);
-    if (proxyPrograms.isNotEmpty) {
+    if (_hasCurrentOrFutureProgram(proxyPrograms)) {
       return proxyPrograms;
     }
 
     try {
       final uri = Uri.parse(
-        '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_short_epg&stream_id=${Uri.encodeQueryComponent(streamId)}&limit=8',
+        '${server.cleanBaseUrl}/player_api.php?username=${Uri.encodeQueryComponent(server.username)}&password=${Uri.encodeQueryComponent(server.password)}&action=get_short_epg&stream_id=${Uri.encodeQueryComponent(streamId)}&limit=24',
       );
       final response = await http.get(
         uri,
@@ -1120,10 +2098,26 @@ class ApiService {
         return const [];
       }
 
-      return _programsFromEpgData(jsonDecode(response.body));
+      final directPrograms = _programsFromEpgData(jsonDecode(response.body));
+      return directPrograms.isNotEmpty ? directPrograms : proxyPrograms;
     } catch (_) {
-      return const [];
+      return proxyPrograms;
     }
+  }
+
+  static bool _hasCurrentOrFutureProgram(List<_LiveProgram> programs) {
+    final now = DateTime.now();
+    return programs.any((program) {
+      final start = program.start;
+      final end = program.end;
+      if (start == null) {
+        return false;
+      }
+      if (end == null) {
+        return !start.isBefore(now);
+      }
+      return end.isAfter(now);
+    });
   }
 
   static Future<List<_LiveProgram>> _fetchShortEpgProxy(
@@ -1194,13 +2188,16 @@ class ApiService {
       ),
       start: _programDateTime(item, const [
         'start_timestamp',
+        'startTimestamp',
         'start',
         'start_time',
         'startTime',
       ]),
       end: _programDateTime(item, const [
         'stop_timestamp',
+        'stopTimestamp',
         'end_timestamp',
+        'endTimestamp',
         'stop',
         'end',
         'end_time',
@@ -1253,6 +2250,27 @@ class ApiService {
     } catch (_) {
       return text;
     }
+  }
+
+  static bool _isBrokenEpgText(String value) {
+    final text = value.trim();
+    if (text.isEmpty) {
+      return true;
+    }
+
+    final replacementCount = text.runes.where((rune) => rune == 0xFFFD).length;
+    if (replacementCount > 0) {
+      return true;
+    }
+
+    final visibleChars = text.replaceAll(RegExp(r'\s+'), '');
+    if (visibleChars.isEmpty) {
+      return true;
+    }
+
+    final letterOrNumberCount =
+        RegExp(r'[A-Za-z0-9À-ÿ]').allMatches(visibleChars).length;
+    return letterOrNumberCount / visibleChars.length < 0.35;
   }
 
   static String _formatProgramLabel(_LiveProgram program) {
@@ -1547,6 +2565,16 @@ class ApiService {
     return '';
   }
 
+  static String _firstNonEmptyString(List<dynamic> values) {
+    for (final value in values) {
+      final text = _stringValue(value);
+      if (text.isNotEmpty) {
+        return text;
+      }
+    }
+    return '';
+  }
+
   static DateTime? _dateFromText(String value) {
     final normalized = value.trim();
     if (normalized.isEmpty) {
@@ -1606,6 +2634,16 @@ String _stringValue(dynamic value, {String fallback = ''}) {
   }
   final text = value.toString().trim();
   return text.isEmpty ? fallback : text;
+}
+
+int _intValue(dynamic value, {int fallback = 0}) {
+  if (value is int) {
+    return value;
+  }
+  if (value is num) {
+    return value.toInt();
+  }
+  return int.tryParse(_stringValue(value)) ?? fallback;
 }
 
 int _seasonSortValue(dynamic value) {

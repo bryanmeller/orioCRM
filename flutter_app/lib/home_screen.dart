@@ -75,6 +75,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final Set<String> _liveEpgLoadingIds = {};
   Timer? _liveEpgFocusTimer;
 
+  static const double _posterCardMaxCrossAxisExtent = 146.0;
+  static const double _posterCardAspectRatio = 0.66;
+  static const double _posterCardSpacing = 9.0;
+
   @override
   void initState() {
     super.initState();
@@ -1779,8 +1783,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _activeSection == HomeSection.favorites);
 
     return Container(
-      height: 70,
-      padding: const EdgeInsets.symmetric(horizontal: 22),
+      height: 58,
+      padding: const EdgeInsets.symmetric(horizontal: 18),
       decoration: const BoxDecoration(
         color: Color(0xFF08090D),
         border: Border(bottom: BorderSide(color: Colors.white10)),
@@ -1801,12 +1805,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Text(
                   'Servidor: $_serverName',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
                 ),
               ],
             ),
@@ -1815,7 +1819,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             children: [
               if (canSearch) ...[
                 SizedBox(width: 280, child: _buildSearchBar(compact: true)),
-                const SizedBox(width: 12),
+                const SizedBox(width: 8),
               ],
               TvFocusable(
                 focusNode: _refreshFocusNode,
@@ -1827,17 +1831,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 },
                 builder: (context, focused) => AnimatedContainer(
                   duration: const Duration(milliseconds: 120),
-                  width: 42,
-                  height: 42,
+                  width: 36,
+                  height: 36,
                   decoration: tvFocusDecoration(
                     focused: focused,
                     baseColor: const Color(0xFF101216),
-                    radius: 14,
+                    radius: 12,
                   ),
-                  child: const Icon(Icons.refresh, color: Colors.white70),
+                  child: const Icon(Icons.refresh,
+                      color: Colors.white70, size: 20),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               _buildFocusButton(
                 icon: Icons.exit_to_app,
                 label: 'Sair',
@@ -1861,11 +1866,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+      padding: const EdgeInsets.fromLTRB(18, 8, 18, 12),
       child: Column(
         children: [
           _buildCategoryRail(_activeCatalog.categories),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           Expanded(child: _buildCatalogList(_filteredItems)),
         ],
       ),
@@ -2149,9 +2154,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           builder: (context, constraints) {
             const gap = 12.0;
             final cardWidth = _fourAcrossCardWidth(constraints.maxWidth, gap);
+            final cardHeight = _wideHomeCardHeight(cardWidth);
 
             return SizedBox(
-              height: 164,
+              height: cardHeight,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemCount: items.length,
@@ -2226,7 +2232,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Positioned(
               left: 12,
               right: 12,
-              bottom: 12,
+              bottom: 10,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2236,11 +2242,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 14,
+                      fontSize: 13,
                       fontWeight: FontWeight.w900,
                     ),
                   ),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 4),
                   Text(
                     item.subtitle.isNotEmpty ? item.subtitle : item.category,
                     maxLines: 1,
@@ -2281,9 +2287,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           builder: (context, constraints) {
             const gap = 12.0;
             final cardWidth = _fourAcrossCardWidth(constraints.maxWidth, gap);
+            final cardHeight = _wideHomeCardHeight(cardWidth);
 
             return SizedBox(
-              height: 164,
+              height: cardHeight,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemCount: items.length,
@@ -2303,6 +2310,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   double _fourAcrossCardWidth(double maxWidth, double gap) {
     return ((maxWidth - (gap * 3)) / 4).clamp(156.0, 246.0).toDouble();
+  }
+
+  double _wideHomeCardHeight(double width) {
+    return (width * 9 / 16).clamp(112.0, 138.0).toDouble();
   }
 
   Widget _buildGameDayCard(
@@ -2403,7 +2414,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Positioned(
               left: 12,
               right: 12,
-              bottom: 12,
+              bottom: 10,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2413,11 +2424,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 14,
+                      fontSize: 13,
                       fontWeight: FontWeight.w900,
                     ),
                   ),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 4),
                   Text(
                     item.subtitle,
                     maxLines: 1,
@@ -2443,11 +2454,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     return SizedBox(
-      height: 44,
+      height: 38,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: categories.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        separatorBuilder: (_, __) => const SizedBox(width: 7),
         itemBuilder: (context, index) {
           final category = categories[index];
           final active = _selectedCategory == category.id;
@@ -2462,13 +2473,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             },
             builder: (context, focused) => AnimatedContainer(
               duration: const Duration(milliseconds: 120),
-              padding: const EdgeInsets.symmetric(horizontal: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 13),
               alignment: Alignment.center,
               decoration: tvFocusDecoration(
                 focused: focused,
                 baseColor:
                     active ? const Color(0xFF6A00FF) : const Color(0xFF101216),
-                radius: 18,
+                radius: 16,
                 borderColor: active ? const Color(0xFFB47CFF) : Colors.white10,
               ),
               child: Text(
@@ -2478,7 +2489,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 style: TextStyle(
                   color: active ? Colors.white : Colors.white60,
                   fontWeight: FontWeight.bold,
-                  fontSize: 12,
+                  fontSize: 11,
                 ),
               ),
             ),
@@ -2495,22 +2506,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ? 'filmes'
             : _activeSection == HomeSection.series
                 ? 'series'
-                : 'conteudos';
+                : _activeSection == HomeSection.favorites
+                    ? 'favoritos'
+                    : 'conteudos';
 
     return Focus(
       canRequestFocus: false,
       onKeyEvent: _leftToSidebarKeyHandler(true),
       child: SizedBox(
-        height: compact ? 42 : 52,
+        height: compact ? 36 : 52,
         child: AndroidTVTextField(
           key: const ValueKey('home-search'),
           focusNode: _searchFocusNode,
           controller: _searchController,
-          height: compact ? 42 : 52,
+          height: compact ? 36 : 52,
           hint: 'Pesquisar $sectionName',
           backgroundColor: const Color(0xFF101216),
           textColor: Colors.white,
-          fontSize: compact ? 14 : 18,
+          fontSize: compact ? 13 : 18,
           verticalPadding: compact ? 0 : 5,
           focuesedBorderColor: const Color(0xFFB47CFF),
           unFocuesedBorderColor: Colors.white10,
@@ -2555,21 +2568,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        const maxCrossAxisExtent = 178.0;
-        const crossAxisSpacing = 12.0;
-        final crossAxisCount =
-            (constraints.maxWidth / (maxCrossAxisExtent + crossAxisSpacing))
-                .ceil()
-                .clamp(1, items.length);
+        final crossAxisCount = (constraints.maxWidth /
+                (_posterCardMaxCrossAxisExtent + _posterCardSpacing))
+            .ceil()
+            .clamp(1, items.length);
 
         return GridView.builder(
           controller: _catalogScrollController,
-          padding: EdgeInsets.zero,
+          padding: const EdgeInsets.only(bottom: 28),
           gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-            maxCrossAxisExtent: maxCrossAxisExtent,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: crossAxisSpacing,
-            childAspectRatio: 0.66,
+            maxCrossAxisExtent: _posterCardMaxCrossAxisExtent,
+            mainAxisSpacing: _posterCardSpacing,
+            crossAxisSpacing: _posterCardSpacing,
+            childAspectRatio: _posterCardAspectRatio,
           ),
           itemCount: items.length,
           itemBuilder: (context, index) => _buildPosterCard(
@@ -2717,16 +2728,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     return SizedBox(
-      height: compact ? 138 : 230,
+      height: compact
+          ? 138
+          : _posterCardMaxCrossAxisExtent / _posterCardAspectRatio,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: items.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 14),
+        separatorBuilder: (_, __) =>
+            SizedBox(width: compact ? 14 : _posterCardSpacing),
         itemBuilder: (context, index) {
           final item = items[index];
           return compact
               ? _buildCompactCard(item, moveLeftToSidebar: index == 0)
-              : _buildPosterCard(item, moveLeftToSidebar: index == 0);
+              : _buildPosterCard(
+                  item,
+                  width: _posterCardMaxCrossAxisExtent,
+                  moveLeftToSidebar: index == 0,
+                );
         },
       ),
     );
@@ -2804,6 +2822,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildPosterCard(
     IptvContentItem item, {
+    double? width,
     bool moveLeftToSidebar = false,
   }) {
     final showCategoryBadge = !((_activeSection == HomeSection.movies ||
@@ -2821,7 +2840,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       },
       builder: (context, focused) => AnimatedContainer(
         duration: const Duration(milliseconds: 120),
-        width: 170,
+        width: width,
         clipBehavior: Clip.antiAlias,
         decoration: tvFocusDecoration(
           focused: focused,
@@ -3090,8 +3109,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (context, focused) => AnimatedContainer(
         duration: const Duration(milliseconds: 120),
         padding: EdgeInsets.symmetric(
-          horizontal: compact ? 16 : 18,
-          vertical: compact ? 11 : 14,
+          horizontal: compact ? 14 : 18,
+          vertical: compact ? 9 : 14,
         ),
         decoration: tvFocusDecoration(
           focused: focused,
@@ -3105,15 +3124,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Icon(
               icon,
               color: focused ? const Color(0xFF6A00FF) : Colors.white,
-              size: 18,
+              size: compact ? 17 : 18,
             ),
-            const SizedBox(width: 8),
+            SizedBox(width: compact ? 7 : 8),
             Text(
               label,
               style: TextStyle(
                 color: focused ? const Color(0xFF6A00FF) : Colors.white,
                 fontWeight: FontWeight.bold,
-                fontSize: compact ? 13 : null,
+                fontSize: compact ? 12 : null,
               ),
             ),
           ],
