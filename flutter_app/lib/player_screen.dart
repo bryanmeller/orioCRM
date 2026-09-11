@@ -1433,6 +1433,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _controlsTimer?.cancel();
     _playerFocusNode.requestFocus();
     _scrollFocusedLiveChannelIntoView();
+    unawaited(_refreshChannelMenuEpgCacheInBackground());
   }
 
   void _closeChannelMenu() {
@@ -1442,6 +1443,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _channelMenuVisible = false;
     });
     _playerFocusNode.requestFocus();
+  }
+
+  Future<void> _refreshChannelMenuEpgCacheInBackground() async {
+    final token = _channelMenuEpgRefreshToken;
+    final items = _liveChannels.where((item) => item.type == 'live').toList();
+    if (items.isEmpty) {
+      return;
+    }
+
+    try {
+      final updatedItems = await ApiService.refreshLiveEpgCache(items);
+      if (!mounted ||
+          token != _channelMenuEpgRefreshToken ||
+          updatedItems.isEmpty) {
+        return;
+      }
+      _replaceChannelMenuLiveItems(
+        updatedItems.map(_liveItemWithResolvedEpgLabel).toList(),
+      );
+      _queueChannelMenuEpgRefresh(delay: const Duration(milliseconds: 120));
+    } catch (_) {
+      // The focused-window refresh below remains the responsive path.
+    }
   }
 
   void _moveFocusedLiveChannel(int delta, List<IptvContentItem> channels) {

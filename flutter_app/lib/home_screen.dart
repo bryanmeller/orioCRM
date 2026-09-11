@@ -192,6 +192,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       _openPendingReminderIfNeeded();
       _queueVisibleLiveEpgRefresh();
+      unawaited(_refreshLiveEpgCacheInBackground());
     } catch (error) {
       if (!mounted) {
         return;
@@ -200,6 +201,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _loading = false;
         _errorMessage = _friendlyError(error);
       });
+    }
+  }
+
+  Future<void> _refreshLiveEpgCacheInBackground() async {
+    final token = _liveEpgRefreshToken;
+    final items = _liveCatalog.items
+        .where((item) => item.type == 'live')
+        .toList(growable: false);
+    if (items.isEmpty) {
+      return;
+    }
+
+    try {
+      final updatedItems = await ApiService.refreshLiveEpgCache(items);
+      if (!mounted || token != _liveEpgRefreshToken || updatedItems.isEmpty) {
+        return;
+      }
+      _replaceLiveCatalogItems(updatedItems);
+    } catch (_) {
+      // Cache refresh is opportunistic; visible/on-focus EPG still handles UI.
     }
   }
 

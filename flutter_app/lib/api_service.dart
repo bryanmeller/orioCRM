@@ -159,9 +159,12 @@ class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
   static const Duration _loginTimeout = Duration(seconds: 30);
   static const Duration _sessionValidationTimeout = Duration(seconds: 12);
+  static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
+  static const Duration _liveNowNextRefreshInterval = Duration(hours: 20);
   static const String _parentalPinKey = 'parental_control_pin';
   static const String _adultContentBlockedKey = 'adult_content_blocked';
   static const String _defaultParentalPin = '1234';
+  static const String _liveNowNextCachePrefix = 'live_now_next_epg_cache_v1';
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -365,7 +368,8 @@ class ApiService {
       );
     }).toList();
 
-    return IptvCatalog(categories: categories, items: items);
+    final cachedItems = await _applyCachedCentralLiveEpg(server, items);
+    return IptvCatalog(categories: categories, items: cachedItems);
   }
 
   static Future<List<IptvContentItem>> fetchLiveEpgItems(
@@ -376,11 +380,35 @@ class ApiService {
       return const [];
     }
     final server = await _requireActiveServer();
+    final cachedItems = await _applyCachedCentralLiveEpg(server, items);
+    if (cachedItems.every((item) => item.liveEpgChecked)) {
+      return cachedItems;
+    }
     return _attachLiveEpg(
       server,
-      items,
+      cachedItems,
       useXtreamFallback: useXtreamFallback,
     );
+  }
+
+  static Future<List<IptvContentItem>> refreshLiveEpgCache(
+    List<IptvContentItem> items, {
+    bool force = false,
+  }) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    final server = await _requireActiveServer();
+    final cachedItems = await _applyCachedCentralLiveEpg(server, items);
+    final hasPendingItems = cachedItems.any((item) => !item.liveEpgChecked);
+    if (!force &&
+        !hasPendingItems &&
+        !await _shouldRefreshCentralLiveEpg(server)) {
+      return cachedItems;
+    }
+
+    return _attachCentralLiveEpg(server, cachedItems);
   }
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
@@ -1270,7 +1298,7 @@ class ApiService {
     List<IptvContentItem> items, {
     required bool useXtreamFallback,
   }) async {
-    final centralResult = await _attachCentralLiveEpg(items);
+    final centralResult = await _attachCentralLiveEpg(server, items);
     final pendingItems = centralResult
         .asMap()
         .entries
@@ -1323,6 +1351,7 @@ class ApiService {
   }
 
   static Future<List<IptvContentItem>> _attachCentralLiveEpg(
+    IptvServer server,
     List<IptvContentItem> items,
   ) async {
     if (items.isEmpty) {
@@ -1339,6 +1368,7 @@ class ApiService {
       if (epgByChannel.isEmpty) {
         continue;
       }
+      await _saveCentralLiveEpgCache(server, epgByChannel);
 
       for (var offset = 0; offset < batch.length; offset++) {
         final item = batch[offset];
@@ -1350,6 +1380,143 @@ class ApiService {
     }
 
     return result;
+  }
+
+  static Future<List<IptvContentItem>> _applyCachedCentralLiveEpg(
+    IptvServer server,
+    List<IptvContentItem> items,
+  ) async {
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    final cached = await _readCentralLiveEpgCache(server);
+    final epgByChannel = cached.$1;
+    final savedAt = cached.$2;
+    if (epgByChannel.isEmpty || savedAt == null) {
+      return items;
+    }
+
+    return items.map((item) {
+      if (item.liveEpgChecked) {
+        return item;
+      }
+      final epg = _epgForItem(item, epgByChannel);
+      if (epg == null || !_cachedNowNextIsUsable(epg, savedAt)) {
+        return item;
+      }
+      return _itemWithNowNextEpg(item, epg);
+    }).toList();
+  }
+
+  static Future<bool> _shouldRefreshCentralLiveEpg(IptvServer server) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_centralLiveEpgCacheKey(server));
+    if (raw == null || raw.isEmpty) {
+      return true;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return true;
+      }
+      final updatedAt = _intValue(decoded['updatedAt']);
+      if (updatedAt <= 0) {
+        return true;
+      }
+      final age = DateTime.now().difference(
+        DateTime.fromMillisecondsSinceEpoch(updatedAt),
+      );
+      return age >= _liveNowNextRefreshInterval;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  static Future<(Map<String, Map<String, dynamic>>, DateTime?)>
+      _readCentralLiveEpgCache(IptvServer server) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_centralLiveEpgCacheKey(server));
+    if (raw == null || raw.isEmpty) {
+      return (<String, Map<String, dynamic>>{}, null);
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return (<String, Map<String, dynamic>>{}, null);
+      }
+      final updatedAt = _intValue(decoded['updatedAt']);
+      final data = decoded['data'];
+      if (updatedAt <= 0 || data is! Map) {
+        return (<String, Map<String, dynamic>>{}, null);
+      }
+
+      final result = <String, Map<String, dynamic>>{};
+      for (final entry in data.entries) {
+        final key = _stringValue(entry.key);
+        final value = entry.value;
+        if (key.isNotEmpty && value is Map) {
+          result[key] = Map<String, dynamic>.from(value);
+        }
+      }
+      return (result, DateTime.fromMillisecondsSinceEpoch(updatedAt));
+    } catch (_) {
+      return (<String, Map<String, dynamic>>{}, null);
+    }
+  }
+
+  static Future<void> _saveCentralLiveEpgCache(
+    IptvServer server,
+    Map<String, Map<String, dynamic>> freshData,
+  ) async {
+    if (freshData.isEmpty) {
+      return;
+    }
+
+    final cached = await _readCentralLiveEpgCache(server);
+    final merged = Map<String, Map<String, dynamic>>.from(cached.$1);
+    merged.addAll(freshData);
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _centralLiveEpgCacheKey(server),
+      jsonEncode({
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        'data': merged,
+      }),
+    );
+  }
+
+  static bool _cachedNowNextIsUsable(
+    Map<String, dynamic> epg,
+    DateTime savedAt,
+  ) {
+    final age = DateTime.now().difference(savedAt);
+    if (age > _liveNowNextCacheMaxAge) {
+      return false;
+    }
+
+    final now = DateTime.now();
+    final current = _liveProgramFromNowNext(epg['current']);
+    if (current?.end != null && current!.end!.isAfter(now)) {
+      return true;
+    }
+
+    final next = _liveProgramFromNowNext(epg['next']);
+    if (next?.start != null && next!.start!.isAfter(now)) {
+      return true;
+    }
+
+    return current != null &&
+        current.end == null &&
+        age < const Duration(hours: 4);
+  }
+
+  static String _centralLiveEpgCacheKey(IptvServer server) {
+    final serverKey = server.id.isNotEmpty ? server.id : server.cleanBaseUrl;
+    return '$_liveNowNextCachePrefix:$serverKey';
   }
 
   static Future<Map<String, Map<String, dynamic>>> _fetchCentralNowNext(
@@ -2257,6 +2424,16 @@ String _stringValue(dynamic value, {String fallback = ''}) {
   }
   final text = value.toString().trim();
   return text.isEmpty ? fallback : text;
+}
+
+int _intValue(dynamic value, {int fallback = 0}) {
+  if (value is int) {
+    return value;
+  }
+  if (value is num) {
+    return value.toInt();
+  }
+  return int.tryParse(_stringValue(value)) ?? fallback;
 }
 
 int _seasonSortValue(dynamic value) {
