@@ -1523,104 +1523,118 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         expanded ? 12 : 10,
         12,
       ),
-      child: Column(
-        crossAxisAlignment:
-            expanded ? CrossAxisAlignment.start : CrossAxisAlignment.center,
-        children: [
-          ClipRect(
-            child: Container(
-              padding: EdgeInsets.all(expanded ? 10 : 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF121216),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white10),
-              ),
-              child: Row(
-                mainAxisAlignment: expanded
-                    ? MainAxisAlignment.start
-                    : MainAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    width: expanded ? 42 : 28,
-                    height: expanded ? 40 : 28,
-                    child: Image.asset(
-                      'assets/images/orio_logo.png',
-                      fit: BoxFit.contain,
-                      alignment: Alignment.centerLeft,
-                    ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final showSidebarText = expanded && constraints.maxWidth >= 150;
+
+          return Column(
+            crossAxisAlignment: showSidebarText
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.center,
+            children: [
+              ClipRect(
+                child: Container(
+                  padding: EdgeInsets.all(showSidebarText ? 10 : 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF121216),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white10),
                   ),
-                  if (expanded) ...[
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Text(
-                        'ORIO PLAYER',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
+                  child: Row(
+                    mainAxisAlignment: showSidebarText
+                        ? MainAxisAlignment.start
+                        : MainAxisAlignment.center,
+                    children: [
+                      SizedBox(
+                        width: showSidebarText ? 42 : 28,
+                        height: showSidebarText ? 40 : 28,
+                        child: Image.asset(
+                          'assets/images/orio_logo.png',
+                          fit: BoxFit.contain,
+                          alignment: Alignment.centerLeft,
                         ),
                       ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                ...HomeSection.values.map((section) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 7),
-                    child: _buildMenuItem(section),
-                  );
-                }),
-                if (expanded) ...[
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF101217),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.white10),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.dns_rounded,
-                          color: Color(0xFFB47CFF),
-                          size: 18,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
+                      if (showSidebarText) ...[
+                        const SizedBox(width: 12),
+                        const Expanded(
                           child: Text(
-                            _serverName,
+                            'ORIO PLAYER',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: Colors.white,
-                              fontSize: 12,
+                              fontSize: 13,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
                         ),
                       ],
-                    ),
+                    ],
                   ),
-                ],
-              ],
-            ),
-          ),
-        ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              Expanded(
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    ...HomeSection.values.map((section) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 7),
+                        child: _buildMenuItem(
+                          section,
+                          showText: showSidebarText,
+                        ),
+                      );
+                    }),
+                    if (showSidebarText) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF101217),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.dns_rounded,
+                              color: Color(0xFFB47CFF),
+                              size: 18,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                _serverName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
 
-  Widget _buildMenuItem(HomeSection section) {
+  Widget _buildMenuItem(
+    HomeSection section, {
+    required bool showText,
+  }) {
     final active = _activeSection == section;
-    final expanded = _sidebarExpanded;
     return TvFocusable(
       focusNode: _sidebarFocusNodes[section],
       autofocus: section == HomeSection.home,
@@ -1635,7 +1649,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         duration: const Duration(milliseconds: 120),
         padding: EdgeInsets.symmetric(
           vertical: 11,
-          horizontal: expanded ? 12 : 0,
+          horizontal: showText ? 12 : 0,
         ),
         decoration: tvFocusDecoration(
           focused: focused,
@@ -1645,14 +1659,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
         child: Row(
           mainAxisAlignment:
-              expanded ? MainAxisAlignment.start : MainAxisAlignment.center,
+              showText ? MainAxisAlignment.start : MainAxisAlignment.center,
           children: [
             Icon(
               section.icon,
               color: active ? const Color(0xFF6A00FF) : Colors.white54,
               size: 18,
             ),
-            if (expanded) ...[
+            if (showText) ...[
               const SizedBox(width: 12),
               Expanded(
                 child: Text(

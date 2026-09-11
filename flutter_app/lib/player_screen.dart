@@ -59,6 +59,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _reconnectTimer;
   Timer? _controlsTimer;
   Timer? _seekDebounceTimer;
+  Timer? _channelMenuEpgTimer;
   final FocusNode _playerFocusNode = FocusNode();
   final ScrollController _channelMenuScrollController = ScrollController();
 
@@ -89,8 +90,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String _focusedControl = 'progress';
   int _focusedLiveCategoryIndex = 0;
   int _focusedLiveChannelIndex = 0;
+  int _channelMenuEpgRefreshToken = 0;
   String _selectedLiveCategoryId = '';
+  List<IptvContentItem> _channelMenuLiveChannels = const [];
   final Set<String> _favoriteIds = {};
+  final Set<String> _channelMenuEpgLoadingIds = {};
   DateTime? _lastBackActionAt;
   Duration _lastPosition = Duration.zero;
   Duration? _pendingSeekTarget;
@@ -134,6 +138,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _activeCategory = widget.category;
     _activeContentId = widget.contentId;
     _activeFavoriteId = widget.favoriteId;
+    _channelMenuLiveChannels = List<IptvContentItem>.from(widget.liveChannels);
     _focusedLiveChannelIndex = _initialLiveChannelIndex();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -169,6 +174,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _reconnectTimer?.cancel();
     _controlsTimer?.cancel();
     _seekDebounceTimer?.cancel();
+    _channelMenuEpgTimer?.cancel();
     _channelMenuScrollController.dispose();
     _playerFocusNode.dispose();
     unawaited(_disposeMediaKitPlayer());
@@ -241,8 +247,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   List<IptvContentItem> get _liveChannels {
-    if (widget.liveChannels.isNotEmpty) {
-      return widget.liveChannels;
+    if (_channelMenuLiveChannels.isNotEmpty) {
+      return _channelMenuLiveChannels;
     }
     return [
       IptvContentItem(
@@ -297,6 +303,137 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return channels.where((channel) {
       return _liveChannelCategoryId(channel) == _selectedLiveCategoryId;
     }).toList();
+  }
+
+  void _queueChannelMenuEpgRefresh({
+    Duration delay = const Duration(milliseconds: 250),
+  }) {
+    if (!_isLiveContent || !_channelMenuVisible) {
+      return;
+    }
+    _channelMenuEpgTimer?.cancel();
+    _channelMenuEpgTimer = Timer(delay, () {
+      if (!mounted || !_channelMenuVisible || _channelMenuShowingCategories) {
+        return;
+      }
+      unawaited(_refreshChannelMenuEpgItems());
+    });
+  }
+
+  Future<void> _refreshChannelMenuEpgItems() async {
+    final categoryId = _selectedLiveCategoryId;
+    final channels = _selectedLiveCategoryChannels;
+    if (channels.isEmpty) {
+      return;
+    }
+
+    final start =
+        _focusedLiveChannelIndex > 4 ? _focusedLiveChannelIndex - 4 : 0;
+    final end = (start + 16).clamp(0, channels.length);
+    final items = channels
+        .sublist(start, end)
+        .where(
+          (item) =>
+              item.type == 'live' &&
+              !item.liveEpgChecked &&
+              !_channelMenuEpgLoadingIds.contains(item.id),
+        )
+        .toList();
+    if (items.isEmpty) {
+      return;
+    }
+
+    final token = _channelMenuEpgRefreshToken;
+    _channelMenuEpgLoadingIds.addAll(items.map((item) => item.id));
+    try {
+      final updatedItems = await ApiService.fetchLiveEpgItems(
+        items,
+        useXtreamFallback: true,
+      ).timeout(const Duration(seconds: 9));
+      if (!mounted ||
+          token != _channelMenuEpgRefreshToken ||
+          categoryId != _selectedLiveCategoryId) {
+        return;
+      }
+
+      _replaceChannelMenuLiveItems(
+        updatedItems.isNotEmpty
+            ? updatedItems.map(_liveItemWithResolvedEpgLabel).toList()
+            : items.map(_liveItemWithoutEpg).toList(),
+      );
+    } on TimeoutException {
+      if (mounted &&
+          token == _channelMenuEpgRefreshToken &&
+          categoryId == _selectedLiveCategoryId) {
+        _replaceChannelMenuLiveItems(items.map(_liveItemWithoutEpg).toList());
+      }
+    } catch (_) {
+      if (mounted &&
+          token == _channelMenuEpgRefreshToken &&
+          categoryId == _selectedLiveCategoryId) {
+        _replaceChannelMenuLiveItems(items.map(_liveItemWithoutEpg).toList());
+      }
+    } finally {
+      for (final item in items) {
+        _channelMenuEpgLoadingIds.remove(item.id);
+      }
+    }
+  }
+
+  void _replaceChannelMenuLiveItems(List<IptvContentItem> updatedItemsList) {
+    if (updatedItemsList.isEmpty || _channelMenuLiveChannels.isEmpty) {
+      return;
+    }
+
+    final updatedById = {
+      for (final item in updatedItemsList) item.id: item,
+    };
+    setState(() {
+      _channelMenuLiveChannels = _channelMenuLiveChannels.map((item) {
+        final updated = updatedById[item.id] ?? item;
+        if (updated.id == _activeFavoriteId) {
+          _activeSubtitle = updated.subtitle;
+          _activeDescription = updated.description;
+        }
+        return updated;
+      }).toList();
+    });
+  }
+
+  IptvContentItem _liveItemWithoutEpg(IptvContentItem item) {
+    final currentLabel =
+        item.subtitle == 'Buscando EPG...' ? 'EPG indisponivel' : item.subtitle;
+    final currentNextShowing = item.nextShowing ?? '';
+    final nextLabel = currentNextShowing == 'Aguardando EPG...'
+        ? 'Sem dados do EPG'
+        : currentNextShowing;
+
+    return IptvContentItem(
+      id: item.id,
+      epgChannelId: item.epgChannelId,
+      title: item.title,
+      subtitle: currentLabel,
+      category: item.category,
+      categoryId: item.categoryId,
+      streamUrl: item.streamUrl,
+      alternateStreamUrls: item.alternateStreamUrls,
+      imageUrl: item.imageUrl,
+      type: item.type,
+      nextShowing: nextLabel,
+      rating: item.rating,
+      year: item.year,
+      description: item.description,
+      eventStartDateTime: item.eventStartDateTime,
+      liveEpgChecked: true,
+    );
+  }
+
+  IptvContentItem _liveItemWithResolvedEpgLabel(IptvContentItem item) {
+    if (item.subtitle == 'Buscando EPG...' ||
+        (item.nextShowing ?? '') == 'Aguardando EPG...') {
+      return _liveItemWithoutEpg(item);
+    }
+    return item;
   }
 
   String _liveChannelCategoryId(IptvContentItem channel) {
@@ -1211,7 +1348,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     if (!_channelMenuShowingCategories) {
+      _channelMenuEpgTimer?.cancel();
       setState(() {
+        _channelMenuEpgRefreshToken++;
         _channelMenuShowingCategories = true;
         _channelMenuFavoriteFocused = false;
       });
@@ -1282,6 +1421,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final categoryIndex =
         categories.indexWhere((category) => category.id == activeCategoryId);
     setState(() {
+      _channelMenuEpgRefreshToken++;
       _channelMenuVisible = true;
       _channelMenuShowingCategories = true;
       _channelMenuFavoriteFocused = false;
@@ -1296,7 +1436,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _closeChannelMenu() {
-    setState(() => _channelMenuVisible = false);
+    _channelMenuEpgTimer?.cancel();
+    setState(() {
+      _channelMenuEpgRefreshToken++;
+      _channelMenuVisible = false;
+    });
     _playerFocusNode.requestFocus();
   }
 
@@ -1308,6 +1452,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         (_focusedLiveChannelIndex + delta).clamp(0, channels.length - 1);
     setState(() => _focusedLiveChannelIndex = nextIndex);
     _scrollFocusedLiveChannelIntoView();
+    _queueChannelMenuEpgRefresh();
   }
 
   void _moveFocusedLiveCategory(int delta) {
@@ -1337,12 +1482,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
             .toList();
     final activeIndex = _activeLiveChannelIndex(channels);
     setState(() {
+      _channelMenuEpgRefreshToken++;
       _selectedLiveCategoryId = category.id;
       _channelMenuShowingCategories = false;
       _channelMenuFavoriteFocused = false;
       _focusedLiveChannelIndex = activeIndex >= 0 ? activeIndex : 0;
     });
     _scrollFocusedLiveChannelIntoView();
+    _queueChannelMenuEpgRefresh(delay: const Duration(milliseconds: 120));
   }
 
   int _activeLiveChannelIndex(List<IptvContentItem> channels) {
