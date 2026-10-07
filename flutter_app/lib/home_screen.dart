@@ -2098,7 +2098,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  _buildImage(item.imageUrl),
+                  _buildImage(item.imageUrl, logicalWidth: width),
                   Container(
                     decoration: const BoxDecoration(
                       gradient: LinearGradient(
@@ -2266,7 +2266,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _buildImage(item.imageUrl),
+            _buildImage(item.imageUrl, logicalWidth: width),
             Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
@@ -2415,7 +2415,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _buildImage(item.imageUrl),
+            _buildImage(item.imageUrl, logicalWidth: width),
             Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
@@ -2822,7 +2822,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       onFocusChange: (focused) {
         if (focused) {
           _collapseSidebar();
-          setState(() => _selectedItem = item);
+          _selectedItem = item;
         }
       },
       builder: (context, focused) => AnimatedContainer(
@@ -2841,7 +2841,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: SizedBox(
                 width: 74,
                 height: 74,
-                child: _buildImage(item.imageUrl),
+                child: _buildImage(item.imageUrl, logicalWidth: 74),
               ),
             ),
             const SizedBox(width: 14),
@@ -2897,7 +2897,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       onFocusChange: (focused) {
         if (focused) {
           _collapseSidebar();
-          setState(() => _selectedItem = item);
+          _selectedItem = item;
         }
       },
       builder: (context, focused) => AnimatedContainer(
@@ -2916,7 +2916,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  _buildImage(item.imageUrl),
+                  _buildImage(
+                    item.imageUrl,
+                    logicalWidth: width ?? _posterCardMaxCrossAxisExtent,
+                  ),
                   if (showCategoryBadge)
                     Positioned(
                       top: 8,
@@ -2964,21 +2967,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildImage(String url) {
+  Widget _buildImage(String url, {double? logicalWidth}) {
     if (url.isEmpty) {
       return _buildFallbackImage();
     }
 
+    final cacheWidth = logicalWidth == null
+        ? null
+        : (logicalWidth * MediaQuery.devicePixelRatioOf(context))
+            .ceil()
+            .clamp(1, 768);
     return Image.network(
       url,
       fit: BoxFit.cover,
+      cacheWidth: cacheWidth,
       errorBuilder: (_, __, ___) => _buildFallbackImage(),
-      loadingBuilder: (context, child, loadingProgress) {
-        if (loadingProgress == null) {
-          return child;
-        }
-        return _buildFallbackImage();
-      },
+      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) =>
+          wasSynchronouslyLoaded || frame != null
+              ? child
+              : _buildFallbackImage(),
     );
   }
 
