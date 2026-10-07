@@ -50,6 +50,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _controller;
   media_kit.Player? _mediaKitPlayer;
   media_kit_video.VideoController? _mediaKitController;
+  Widget? _videoPlayerView;
+  Widget? _mediaKitVideoView;
   StreamSubscription<Duration>? _mediaKitPositionSubscription;
   StreamSubscription<Duration>? _mediaKitDurationSubscription;
   StreamSubscription<bool>? _mediaKitPlayingSubscription;
@@ -95,6 +97,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   List<IptvContentItem> _channelMenuLiveChannels = const [];
   final Set<String> _favoriteIds = {};
   final Set<String> _channelMenuEpgLoadingIds = {};
+  DateTime? _channelMenuEpgRetryAfter;
   DateTime? _lastBackActionAt;
   Duration _lastPosition = Duration.zero;
   Duration? _pendingSeekTarget;
@@ -317,135 +320,79 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }).toList();
   }
 
-  void _queueChannelMenuEpgRefresh({
-    Duration delay = const Duration(milliseconds: 250),
-  }) {
-    if (!_isLiveContent || !_channelMenuVisible) {
+  void _queueChannelMenuEpgRefresh() {
+    if (!_isLiveContent ||
+        !_channelMenuVisible ||
+        _channelMenuShowingCategories) {
+      return;
+    }
+    final retryAfter = _channelMenuEpgRetryAfter;
+    if (retryAfter != null && DateTime.now().isBefore(retryAfter)) {
       return;
     }
     _channelMenuEpgTimer?.cancel();
-    _channelMenuEpgTimer = Timer(delay, () {
-      if (!mounted || !_channelMenuVisible || _channelMenuShowingCategories) {
-        return;
+    _channelMenuEpgTimer = Timer(const Duration(milliseconds: 250), () {
+      if (mounted && _channelMenuVisible && !_channelMenuShowingCategories) {
+        unawaited(_refreshChannelMenuEpgItems());
       }
-      unawaited(_refreshChannelMenuEpgItems());
     });
   }
 
   Future<void> _refreshChannelMenuEpgItems() async {
-    final categoryId = _selectedLiveCategoryId;
     final channels = _selectedLiveCategoryChannels;
     if (channels.isEmpty) {
       return;
     }
-
     final start =
         _focusedLiveChannelIndex > 4 ? _focusedLiveChannelIndex - 4 : 0;
     final end = (start + 16).clamp(0, channels.length);
-    final items = channels
-        .sublist(start, end)
-        .where(
-          (item) =>
-              item.type == 'live' &&
-              !item.liveEpgChecked &&
-              !_channelMenuEpgLoadingIds.contains(item.id),
-        )
-        .toList();
+    final items = channels.sublist(start, end).where((item) {
+      return item.type == 'live' &&
+          !item.liveEpgChecked &&
+          !_channelMenuEpgLoadingIds.contains(item.id);
+    }).toList();
     if (items.isEmpty) {
       return;
     }
 
     final token = _channelMenuEpgRefreshToken;
+    final categoryId = _selectedLiveCategoryId;
     _channelMenuEpgLoadingIds.addAll(items.map((item) => item.id));
     try {
-      final updatedItems = await ApiService.fetchLiveEpgItems(
+      final updated = await ApiService.fetchLiveEpgItems(
         items,
-        useXtreamFallback: true,
-      ).timeout(const Duration(seconds: 9));
+        useXtreamFallback: false,
+      );
       if (!mounted ||
+          !_channelMenuVisible ||
+          _channelMenuShowingCategories ||
           token != _channelMenuEpgRefreshToken ||
           categoryId != _selectedLiveCategoryId) {
         return;
       }
-
-      _replaceChannelMenuLiveItems(
-        updatedItems.isNotEmpty
-            ? updatedItems.map(_liveItemWithResolvedEpgLabel).toList()
-            : items.map(_liveItemWithoutEpg).toList(),
-      );
-    } on TimeoutException {
-      if (mounted &&
-          token == _channelMenuEpgRefreshToken &&
-          categoryId == _selectedLiveCategoryId) {
-        _replaceChannelMenuLiveItems(items.map(_liveItemWithoutEpg).toList());
+      if (updated.every((item) => !item.liveEpgChecked)) {
+        _channelMenuEpgRetryAfter =
+            DateTime.now().add(const Duration(seconds: 15));
+        return;
       }
+      final updatedById = {for (final item in updated) item.id: item};
+      setState(() {
+        _channelMenuLiveChannels = _channelMenuLiveChannels.map((item) {
+          final refreshed = updatedById[item.id] ?? item;
+          if (refreshed.id == _activeFavoriteId) {
+            _activeSubtitle = refreshed.subtitle;
+          }
+          return refreshed;
+        }).toList();
+      });
     } catch (_) {
-      if (mounted &&
-          token == _channelMenuEpgRefreshToken &&
-          categoryId == _selectedLiveCategoryId) {
-        _replaceChannelMenuLiveItems(items.map(_liveItemWithoutEpg).toList());
-      }
+      _channelMenuEpgRetryAfter =
+          DateTime.now().add(const Duration(seconds: 15));
     } finally {
       for (final item in items) {
         _channelMenuEpgLoadingIds.remove(item.id);
       }
     }
-  }
-
-  void _replaceChannelMenuLiveItems(List<IptvContentItem> updatedItemsList) {
-    if (updatedItemsList.isEmpty || _channelMenuLiveChannels.isEmpty) {
-      return;
-    }
-
-    final updatedById = {
-      for (final item in updatedItemsList) item.id: item,
-    };
-    setState(() {
-      _channelMenuLiveChannels = _channelMenuLiveChannels.map((item) {
-        final updated = updatedById[item.id] ?? item;
-        if (updated.id == _activeFavoriteId) {
-          _activeSubtitle = updated.subtitle;
-          _activeDescription = updated.description;
-        }
-        return updated;
-      }).toList();
-    });
-  }
-
-  IptvContentItem _liveItemWithoutEpg(IptvContentItem item) {
-    final currentLabel =
-        item.subtitle == 'Buscando EPG...' ? 'EPG indisponivel' : item.subtitle;
-    final currentNextShowing = item.nextShowing ?? '';
-    final nextLabel = currentNextShowing == 'Aguardando EPG...'
-        ? 'Sem dados do EPG'
-        : currentNextShowing;
-
-    return IptvContentItem(
-      id: item.id,
-      epgChannelId: item.epgChannelId,
-      title: item.title,
-      subtitle: currentLabel,
-      category: item.category,
-      categoryId: item.categoryId,
-      streamUrl: item.streamUrl,
-      alternateStreamUrls: item.alternateStreamUrls,
-      imageUrl: item.imageUrl,
-      type: item.type,
-      nextShowing: nextLabel,
-      rating: item.rating,
-      year: item.year,
-      description: item.description,
-      eventStartDateTime: item.eventStartDateTime,
-      liveEpgChecked: true,
-    );
-  }
-
-  IptvContentItem _liveItemWithResolvedEpgLabel(IptvContentItem item) {
-    if (item.subtitle == 'Buscando EPG...' ||
-        (item.nextShowing ?? '') == 'Aguardando EPG...') {
-      return _liveItemWithoutEpg(item);
-    }
-    return item;
   }
 
   String _liveChannelCategoryId(IptvContentItem channel) {
@@ -612,6 +559,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final previous = _controller;
       previous?.removeListener(_onControllerChanged);
       _controller = nextController;
+      _videoPlayerView = RepaintBoundary(child: VideoPlayer(_controller!));
+      _mediaKitVideoView = null;
       _controller!.addListener(_onControllerChanged);
       assignedController = true;
       await previous?.dispose();
@@ -746,6 +695,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final controller = media_kit_video.VideoController(player);
       _mediaKitPlayer = player;
       _mediaKitController = controller;
+      _mediaKitVideoView = RepaintBoundary(
+        child: media_kit_video.Video(controller: controller),
+      );
+      _videoPlayerView = null;
       _bindMediaKitStreams(player);
 
       _setLoadingStatus('Conectando ao servidor...');
@@ -1054,6 +1007,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     _controller = null;
+    _videoPlayerView = null;
     current.removeListener(_onControllerChanged);
     try {
       if (current.value.isInitialized) {
@@ -1078,6 +1032,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final player = _mediaKitPlayer;
     _mediaKitPlayer = null;
     _mediaKitController = null;
+    _mediaKitVideoView = null;
     _mediaKitDuration = Duration.zero;
     _mediaKitPlaying = false;
     await player?.dispose();
@@ -1107,14 +1062,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _startPositionTicker() {
     _positionTimer?.cancel();
     _positionTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-      if (mounted) {
-        setState(() {
-          _lastPosition = _mediaKitPlayer?.state.position ??
-              _controller?.value.position ??
-              _lastPosition;
-        });
-        _savePlaybackProgressIfNeeded();
+      if (!mounted) {
+        return;
       }
+
+      _lastPosition = _mediaKitPlayer?.state.position ??
+          _controller?.value.position ??
+          _lastPosition;
+      if (_isLiveContent) {
+        return;
+      }
+
+      setState(() {});
+      _savePlaybackProgressIfNeeded();
     });
   }
 
@@ -1315,7 +1275,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (_channelMenuShowingCategories) {
         _closeChannelMenu();
       } else {
+        _channelMenuEpgTimer?.cancel();
         setState(() {
+          _channelMenuEpgRefreshToken++;
           _channelMenuShowingCategories = true;
           _channelMenuFavoriteFocused = false;
         });
@@ -1433,7 +1395,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final categoryIndex =
         categories.indexWhere((category) => category.id == activeCategoryId);
     setState(() {
-      _channelMenuEpgRefreshToken++;
       _channelMenuVisible = true;
       _channelMenuShowingCategories = true;
       _channelMenuFavoriteFocused = false;
@@ -1497,14 +1458,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
             .toList();
     final activeIndex = _activeLiveChannelIndex(channels);
     setState(() {
-      _channelMenuEpgRefreshToken++;
       _selectedLiveCategoryId = category.id;
       _channelMenuShowingCategories = false;
       _channelMenuFavoriteFocused = false;
       _focusedLiveChannelIndex = activeIndex >= 0 ? activeIndex : 0;
     });
     _scrollFocusedLiveChannelIntoView();
-    _queueChannelMenuEpgRefresh(delay: const Duration(milliseconds: 120));
+    _queueChannelMenuEpgRefresh();
   }
 
   int _activeLiveChannelIndex(List<IptvContentItem> channels) {
@@ -1573,6 +1533,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final visibleBottom =
           position.pixels + position.viewportDimension - edgePadding;
 
+      if (_channelMenuShowingCategories) {
+        final centeredTarget =
+            itemTop - ((position.viewportDimension - itemExtent) / 2);
+        final target = centeredTarget.clamp(0.0, position.maxScrollExtent);
+        if ((target - position.pixels).abs() > 1) {
+          _channelMenuScrollController.jumpTo(target);
+        }
+        return;
+      }
+
       double target;
       if (itemTop < visibleTop) {
         target = itemTop - edgePadding;
@@ -1583,11 +1553,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
 
       target = target.clamp(0.0, position.maxScrollExtent);
-      if (_channelMenuShowingCategories) {
-        _channelMenuScrollController.jumpTo(target);
-        return;
-      }
-
       _channelMenuScrollController.animateTo(
         target,
         duration: const Duration(milliseconds: 70),
@@ -2229,7 +2194,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return ColoredBox(
         color: Colors.black,
         child: SizedBox.expand(
-          child: media_kit_video.Video(controller: mediaKitController),
+          child: _mediaKitVideoView ??
+              RepaintBoundary(
+                child: media_kit_video.Video(controller: mediaKitController),
+              ),
         ),
       );
     }
@@ -2242,7 +2210,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return ColoredBox(
       color: Colors.black,
       child: SizedBox.expand(
-        child: VideoPlayer(controller),
+        child:
+            _videoPlayerView ?? RepaintBoundary(child: VideoPlayer(controller)),
       ),
     );
   }
@@ -2263,8 +2232,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ? 'Categorias'
         : selectedCategory?.label ?? 'Canais';
 
-    return Container(
-      color: const Color(0x33000000),
+    return RepaintBoundary(
       child: Align(
         alignment: Alignment.centerLeft,
         child: Padding(
@@ -2277,13 +2245,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
           child: Container(
             width: 390,
             decoration: BoxDecoration(
-              color: const Color(0xB808090D),
+              color: const Color(0xFF08090D),
               border: Border.all(color: Colors.white12),
               boxShadow: const [
                 BoxShadow(
-                  color: Color(0xAA000000),
-                  blurRadius: 28,
-                  offset: Offset(10, 0),
+                  color: Color(0x66000000),
+                  blurRadius: 14,
+                  offset: Offset(6, 0),
                 ),
               ],
             ),
@@ -2336,7 +2304,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             )
                           : ListView.builder(
                               controller: _channelMenuScrollController,
-                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              padding: const EdgeInsets.fromLTRB(0, 8, 0, 44),
                               itemCount: categories.length,
                               itemBuilder: (context, index) {
                                 final category = categories[index];
@@ -2390,8 +2358,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() => _focusedLiveCategoryIndex = index);
         _openFocusedLiveCategory();
       },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
+      child: Container(
         height: 74,
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
         padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2468,8 +2435,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() => _focusedLiveChannelIndex = index);
         unawaited(_playLiveChannel(channel));
       },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
+      child: Container(
         height: 86,
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
         padding: const EdgeInsets.all(10),
@@ -2541,8 +2507,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 });
                 unawaited(_toggleChannelFavorite(channel));
               },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
+              child: Container(
                 width: 42,
                 height: 42,
                 alignment: Alignment.center,
@@ -2579,6 +2544,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return Image.network(
       url,
       fit: BoxFit.contain,
+      cacheWidth: 96,
+      cacheHeight: 82,
+      filterQuality: FilterQuality.low,
+      gaplessPlayback: true,
       errorBuilder: (_, __, ___) => _buildChannelImageFallback(),
       loadingBuilder: (context, child, loadingProgress) {
         if (loadingProgress == null) {

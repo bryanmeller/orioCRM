@@ -74,6 +74,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _homeLoadToken = 0;
   final Set<String> _liveEpgLoadingIds = {};
   Timer? _liveEpgFocusTimer;
+  Timer? _liveEpgRetryTimer;
+  Duration _liveEpgRetryDelay = const Duration(minutes: 1);
+  bool _backgroundEpgRefreshing = false;
 
   static const double _posterCardMaxCrossAxisExtent = 146.0;
   static const double _posterCardAspectRatio = 0.66;
@@ -105,6 +108,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _homeDashboardScrollController.dispose();
     _settingsScrollController.dispose();
     _liveEpgFocusTimer?.cancel();
+    _liveEpgRetryTimer?.cancel();
     for (final node in _sidebarFocusNodes.values) {
       node.dispose();
     }
@@ -125,7 +129,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(_validateActiveSessionOrExit());
+      unawaited(_refreshEpgAfterSessionValidation());
+    }
+  }
+
+  Future<void> _refreshEpgAfterSessionValidation() async {
+    final valid = await _validateActiveSessionOrExit();
+    if (valid && mounted && !_loading) {
+      await _refreshLiveEpgCacheInBackground();
     }
   }
 
@@ -141,6 +152,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _loadHome({bool refreshServersFirst = false}) async {
     final loadToken = ++_homeLoadToken;
     _liveEpgRefreshToken++;
+    _liveEpgRetryTimer?.cancel();
     setState(() {
       _loading = true;
       _errorMessage = null;
@@ -199,7 +211,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       _openPendingReminderIfNeeded();
       _queueVisibleLiveEpgRefresh();
-      unawaited(_refreshLiveEpgCacheInBackground());
+      unawaited(_refreshHomeEpgPreviewThenCache());
     } catch (error) {
       if (!mounted || loadToken != _homeLoadToken) {
         return;
@@ -227,24 +239,93 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return items.isNotEmpty ? items.first : null;
   }
 
-  Future<void> _refreshLiveEpgCacheInBackground() async {
+  Future<void> _refreshHomeEpgPreviewThenCache() async {
     final token = _liveEpgRefreshToken;
+    if (_activeSection == HomeSection.home) {
+      final seen = <String>{};
+      final candidates = [
+        ..._gamesOfTheDayItems.take(4),
+        ..._favoriteHomeItems.where((item) => item.type == 'live').take(4),
+        ..._visibleLiveCatalog.items.take(8),
+      ]
+          .where((item) =>
+              item.type == 'live' && !item.liveEpgChecked && seen.add(item.id))
+          .toList();
+      if (candidates.isNotEmpty) {
+        try {
+          final updated = await ApiService.fetchLiveEpgItems(
+            candidates,
+            useXtreamFallback: false,
+          );
+          if (mounted && token == _liveEpgRefreshToken && updated.isNotEmpty) {
+            _replaceLiveCatalogItems(updated);
+          }
+        } catch (_) {
+          // The full refresh below can retry without hiding existing EPG.
+        }
+      }
+    }
+    if (mounted && token == _liveEpgRefreshToken) {
+      await _refreshLiveEpgCacheInBackground();
+    }
+  }
+
+  Future<void> _refreshLiveEpgCacheInBackground() async {
+    if (_backgroundEpgRefreshing) {
+      return;
+    }
+    _backgroundEpgRefreshing = true;
+    final token = _liveEpgRefreshToken;
+    final stopwatch = Stopwatch()..start();
     final items = _liveCatalog.items
         .where((item) => item.type == 'live')
         .toList(growable: false);
     if (items.isEmpty) {
+      _backgroundEpgRefreshing = false;
       return;
     }
 
     try {
-      final updatedItems = await ApiService.refreshLiveEpgCache(items);
-      if (!mounted || token != _liveEpgRefreshToken || updatedItems.isEmpty) {
+      final refresh = await ApiService.refreshLiveEpgCache(items);
+      if (!refresh.success) {
+        _scheduleLiveEpgRetry();
+      } else {
+        _liveEpgRetryTimer?.cancel();
+        _liveEpgRetryDelay = const Duration(minutes: 1);
+      }
+      if (!mounted || token != _liveEpgRefreshToken || refresh.items.isEmpty) {
         return;
       }
-      _replaceLiveCatalogItems(updatedItems);
+      _replaceLiveCatalogItems(refresh.items);
+      if (ApiService.epgDiagnosticsEnabled) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          debugPrint(
+            'EPG background channels=${items.length} '
+            'visibleMs=${stopwatch.elapsedMilliseconds}',
+          );
+        });
+      }
     } catch (_) {
-      // Cache refresh is opportunistic; visible/on-focus EPG still handles UI.
+      _scheduleLiveEpgRetry();
+    } finally {
+      _backgroundEpgRefreshing = false;
     }
+  }
+
+  void _scheduleLiveEpgRetry() {
+    if (!mounted) {
+      return;
+    }
+    _liveEpgRetryTimer?.cancel();
+    final delay = _liveEpgRetryDelay;
+    _liveEpgRetryDelay = Duration(
+      minutes: (_liveEpgRetryDelay.inMinutes * 2).clamp(1, 16),
+    );
+    _liveEpgRetryTimer = Timer(delay, () {
+      if (mounted) {
+        unawaited(_refreshLiveEpgCacheInBackground());
+      }
+    });
   }
 
   Future<bool> _validateActiveSessionOrExit({
@@ -305,6 +386,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     final token = _liveEpgRefreshToken;
+    final stopwatch = Stopwatch()..start();
     _liveEpgLoadingIds.addAll(items.map((item) => item.id));
     try {
       final updatedItems = await ApiService.fetchLiveEpgItems(
@@ -317,16 +399,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return;
       }
 
-      _replaceLiveCatalogItems(
-        updatedItems.isNotEmpty
-            ? updatedItems
-            : items.map(_liveItemWithoutEpg).toList(),
-      );
+      if (updatedItems.isNotEmpty) {
+        _replaceLiveCatalogItems(updatedItems);
+        if (ApiService.epgDiagnosticsEnabled) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            debugPrint(
+              'EPG visible channels=${items.length} '
+              'visibleMs=${stopwatch.elapsedMilliseconds}',
+            );
+          });
+        }
+      }
     } catch (_) {
-      if (mounted &&
-          token == _liveEpgRefreshToken &&
-          _activeSection == HomeSection.live) {
-        _replaceLiveCatalogItems(items.map(_liveItemWithoutEpg).toList());
+      if (ApiService.epgDiagnosticsEnabled) {
+        debugPrint('EPG visible refresh failed');
       }
       return;
     } finally {
@@ -344,6 +430,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     final token = _liveEpgRefreshToken;
+    final stopwatch = Stopwatch()..start();
     _liveEpgLoadingIds.add(item.id);
     try {
       final updatedItems = await ApiService.fetchLiveEpgItems(
@@ -356,16 +443,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return;
       }
 
-      _replaceLiveCatalogItem(
-        updatedItems.isNotEmpty
-            ? updatedItems.first
-            : _liveItemWithoutEpg(item),
-      );
+      if (updatedItems.isNotEmpty) {
+        _replaceLiveCatalogItem(updatedItems.first);
+        if (ApiService.epgDiagnosticsEnabled) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            debugPrint(
+              'EPG focused visibleMs=${stopwatch.elapsedMilliseconds}',
+            );
+          });
+        }
+      }
     } catch (_) {
-      if (mounted &&
-          token == _liveEpgRefreshToken &&
-          _activeSection == HomeSection.live) {
-        _replaceLiveCatalogItem(_liveItemWithoutEpg(item));
+      if (ApiService.epgDiagnosticsEnabled) {
+        debugPrint('EPG focused refresh failed');
       }
       return;
     } finally {
@@ -403,34 +493,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _selectedItem = selectedItem;
       }
     });
-  }
-
-  IptvContentItem _liveItemWithoutEpg(IptvContentItem item) {
-    final currentLabel =
-        item.subtitle == 'Buscando EPG...' ? 'EPG indisponivel' : item.subtitle;
-    final currentNextShowing = item.nextShowing ?? '';
-    final nextLabel = currentNextShowing == 'Aguardando EPG...'
-        ? 'Sem dados do EPG'
-        : currentNextShowing;
-
-    return IptvContentItem(
-      id: item.id,
-      epgChannelId: item.epgChannelId,
-      title: item.title,
-      subtitle: currentLabel,
-      category: item.category,
-      categoryId: item.categoryId,
-      streamUrl: item.streamUrl,
-      alternateStreamUrls: item.alternateStreamUrls,
-      imageUrl: item.imageUrl,
-      type: item.type,
-      nextShowing: nextLabel,
-      rating: item.rating,
-      year: item.year,
-      description: item.description,
-      eventStartDateTime: item.eventStartDateTime,
-      liveEpgChecked: true,
-    );
   }
 
   List<IptvContentItem> _liveEpgRefreshCandidates() {

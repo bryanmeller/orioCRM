@@ -66,3 +66,13 @@ flutter build apk --release
 ```
 
 O arquivo gerado estará em `build/app/outputs/flutter-apk/app-release.apk`.
+
+## Diagnóstico de desempenho do EPG
+
+Em uma TV Android ou emulador com sessão válida, execute:
+
+```bash
+flutter run --dart-define=EPG_DIAGNOSTICS=true
+```
+
+Os logs `EPG central` mostram quantidade de canais, correspondências, status HTTP, tempo da chamada, bytes decodificados, `Content-Encoding`, disponibilidade e origem da resposta. Os logs `EPG visible`, `EPG focused` e `EPG background` mostram o tempo até a atualização da interface. Nenhum token ou nome de canal é registrado. Em builds de debug, esses logs já ficam ativos; em outros builds, use a flag acima para ativá-los.

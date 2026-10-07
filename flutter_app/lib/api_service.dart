@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -169,16 +171,30 @@ class _LiveProgram {
   });
 }
 
+class _CentralEpgBatchResult {
+  final bool success;
+  final Map<String, Map<String, dynamic>> data;
+
+  const _CentralEpgBatchResult({required this.success, required this.data});
+}
+
 class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
   static const Duration _loginTimeout = Duration(seconds: 30);
   static const Duration _sessionValidationTimeout = Duration(seconds: 12);
   static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
   static const Duration _liveNowNextRefreshInterval = Duration(hours: 20);
+  static const Duration _missingLiveEpgRefreshInterval = Duration(minutes: 30);
   static const String _parentalPinKey = 'parental_control_pin';
   static const String _adultContentBlockedKey = 'adult_content_blocked';
   static const String _defaultParentalPin = '1234';
   static const String _liveNowNextCachePrefix = 'live_now_next_epg_cache_v1';
+  static const bool epgDiagnosticsEnabled = kDebugMode ||
+      bool.fromEnvironment('EPG_DIAGNOSTICS', defaultValue: false);
+  static final http.Client _epgHttpClient = http.Client();
+  static final Map<String, Future<_CentralEpgBatchResult>> _centralEpgInFlight =
+      {};
+  static final Map<String, Future<void>> _centralEpgCacheWrites = {};
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -538,24 +554,40 @@ class ApiService {
     );
   }
 
-  static Future<List<IptvContentItem>> refreshLiveEpgCache(
+  static Future<({List<IptvContentItem> items, bool success})>
+      refreshLiveEpgCache(
     List<IptvContentItem> items, {
     bool force = false,
   }) async {
     if (items.isEmpty) {
-      return const [];
+      return (items: <IptvContentItem>[], success: true);
     }
 
     final server = await _requireActiveServer();
     final cachedItems = await _applyCachedCentralLiveEpg(server, items);
-    final hasPendingItems = cachedItems.any((item) => !item.liveEpgChecked);
+    final pendingItems =
+        cachedItems.where((item) => !item.liveEpgChecked).toList();
     if (!force &&
-        !hasPendingItems &&
+        pendingItems.isEmpty &&
         !await _shouldRefreshCentralLiveEpg(server)) {
-      return cachedItems;
+      return (items: cachedItems, success: true);
     }
 
-    return _attachCentralLiveEpg(server, cachedItems);
+    final refreshItems =
+        force || pendingItems.isEmpty ? cachedItems : pendingItems;
+    final refreshed = await _attachCentralLiveEpg(server, refreshItems);
+    final refreshedById = {
+      for (final item in refreshed.items)
+        item.id: refreshed.success && !item.liveEpgChecked
+            ? _itemWithoutLiveEpg(item)
+            : item,
+    };
+    return (
+      items: [
+        for (final item in cachedItems) refreshedById[item.id] ?? item,
+      ],
+      success: refreshed.success,
+    );
   }
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
@@ -1508,7 +1540,11 @@ class ApiService {
     List<IptvContentItem> items, {
     required bool useXtreamFallback,
   }) async {
-    final centralResult = await _attachCentralLiveEpg(server, items);
+    final central = await _attachCentralLiveEpg(server, items);
+    final centralResult = central.items;
+    if (!central.success) {
+      return centralResult;
+    }
     final pendingItems = centralResult
         .asMap()
         .entries
@@ -1517,7 +1553,7 @@ class ApiService {
     if (pendingItems.isEmpty) {
       return centralResult;
     }
-    if (!useXtreamFallback) {
+    if (!useXtreamFallback || items.length != 1) {
       final result = List<IptvContentItem>.from(centralResult);
       for (final entry in pendingItems) {
         result[entry.key] = _itemWithoutLiveEpg(entry.value);
@@ -1525,22 +1561,10 @@ class ApiService {
       return result;
     }
 
-    const batchSize = 10;
     final result = List<IptvContentItem>.from(centralResult);
-
-    for (var start = 0; start < pendingItems.length; start += batchSize) {
-      final end = (start + batchSize).clamp(0, pendingItems.length);
-      final updates = await Future.wait(
-        [
-          for (var index = start; index < end; index++)
-            _itemWithShortEpg(server, pendingItems[index].value),
-        ],
-      );
-      for (var offset = 0; offset < updates.length; offset++) {
-        result[pendingItems[start + offset].key] = updates[offset];
-      }
+    for (final entry in pendingItems) {
+      result[entry.key] = await _itemWithShortEpg(server, entry.value);
     }
-
     return result;
   }
 
@@ -1560,36 +1584,108 @@ class ApiService {
     );
   }
 
-  static Future<List<IptvContentItem>> _attachCentralLiveEpg(
+  static Future<({List<IptvContentItem> items, bool success})>
+      _attachCentralLiveEpg(
     IptvServer server,
     List<IptvContentItem> items,
   ) async {
     if (items.isEmpty) {
-      return const [];
+      return (items: <IptvContentItem>[], success: true);
     }
 
     const batchSize = 120;
     final result = List<IptvContentItem>.from(items);
+    final freshData = <String, Map<String, dynamic>>{};
+    var centralSucceeded = true;
 
     for (var start = 0; start < result.length; start += batchSize) {
       final end = (start + batchSize).clamp(0, result.length);
       final batch = result.sublist(start, end);
-      final epgByChannel = await _fetchCentralNowNext(batch);
-      if (epgByChannel.isEmpty) {
-        continue;
+      final requestsByKey = <String, Future<_CentralEpgBatchResult>>{};
+      final missing = <IptvContentItem>[];
+      for (final item in batch) {
+        final key = _centralEpgInFlightKey(server, item);
+        final inFlight = _centralEpgInFlight[key];
+        if (inFlight == null) {
+          missing.add(item);
+        } else {
+          requestsByKey[key] = inFlight;
+        }
       }
-      await _saveCentralLiveEpgCache(server, epgByChannel);
+
+      Future<_CentralEpgBatchResult>? newRequest;
+      if (missing.isNotEmpty) {
+        newRequest = _fetchCentralNowNext(missing);
+        for (final item in missing) {
+          final key = _centralEpgInFlightKey(server, item);
+          _centralEpgInFlight[key] = newRequest;
+          requestsByKey[key] = newRequest;
+        }
+        final completedRequest = newRequest;
+        void clearInFlight() {
+          for (final item in missing) {
+            final key = _centralEpgInFlightKey(server, item);
+            if (identical(_centralEpgInFlight[key], completedRequest)) {
+              _centralEpgInFlight.remove(key);
+            }
+          }
+        }
+
+        unawaited(completedRequest.then(
+          (_) => clearInFlight(),
+          onError: (_) => clearInFlight(),
+        ));
+      }
+
+      final uniqueRequests = requestsByKey.values.toSet().toList();
+      final responses = await Future.wait(uniqueRequests);
+      final responseByRequest =
+          <Future<_CentralEpgBatchResult>, _CentralEpgBatchResult>{
+        for (var index = 0; index < uniqueRequests.length; index++)
+          uniqueRequests[index]: responses[index],
+      };
+      if (newRequest != null) {
+        freshData.addAll(responseByRequest[newRequest]?.data ?? const {});
+      }
 
       for (var offset = 0; offset < batch.length; offset++) {
         final item = batch[offset];
-        final epg = _epgForItem(item, epgByChannel);
+        final response = responseByRequest[
+            requestsByKey[_centralEpgInFlightKey(server, item)]];
+        if (response == null) {
+          centralSucceeded = false;
+          continue;
+        }
+        centralSucceeded &= response.success;
+        final epg = _epgForItem(item, response.data);
         if (epg != null) {
           result[start + offset] = _itemWithNowNextEpg(item, epg);
         }
       }
     }
 
-    return result;
+    if (freshData.isNotEmpty) {
+      try {
+        await _saveCentralLiveEpgCache(server, freshData);
+      } catch (_) {
+        if (epgDiagnosticsEnabled) {
+          debugPrint('EPG cache write failed');
+        }
+      }
+    }
+    return (items: result, success: centralSucceeded);
+  }
+
+  static String _centralEpgInFlightKey(
+    IptvServer server,
+    IptvContentItem item,
+  ) {
+    return jsonEncode([
+      _centralLiveEpgCacheKey(server),
+      item.id,
+      item.epgChannelId,
+      item.title,
+    ]);
   }
 
   static Future<List<IptvContentItem>> _applyCachedCentralLiveEpg(
@@ -1612,10 +1708,18 @@ class ApiService {
         return item;
       }
       final epg = _epgForItem(item, epgByChannel);
-      if (epg == null || !_cachedNowNextIsUsable(epg, savedAt)) {
-        return item;
+      final epgSavedAt = epg == null ? savedAt : _epgCachedAt(epg, savedAt);
+      if (epg != null && _cachedNowNextIsUsable(epg, epgSavedAt)) {
+        return _itemWithNowNextEpg(item, epg);
       }
-      return _itemWithNowNextEpg(item, epg);
+      final checked = _epgRowForItem(item, epgByChannel);
+      if (checked != null &&
+          !_hasNowNextData(checked) &&
+          DateTime.now().difference(_epgCachedAt(checked, savedAt)) <
+              _missingLiveEpgRefreshInterval) {
+        return _itemWithoutLiveEpg(item);
+      }
+      return item;
     }).toList();
   }
 
@@ -1684,19 +1788,37 @@ class ApiService {
     if (freshData.isEmpty) {
       return;
     }
+    final key = _centralLiveEpgCacheKey(server);
+    final previousWrite = _centralEpgCacheWrites[key];
+    Future<void> write() async {
+      final cached = await _readCentralLiveEpgCache(server);
+      final merged = Map<String, Map<String, dynamic>>.from(cached.$1);
+      final savedAt = DateTime.now().millisecondsSinceEpoch;
+      for (final entry in freshData.entries) {
+        merged[entry.key] = {...entry.value, '_cachedAt': savedAt};
+      }
 
-    final cached = await _readCentralLiveEpgCache(server);
-    final merged = Map<String, Map<String, dynamic>>.from(cached.$1);
-    merged.addAll(freshData);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        key,
+        jsonEncode({
+          'updatedAt': savedAt,
+          'data': merged,
+        }),
+      );
+    }
 
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _centralLiveEpgCacheKey(server),
-      jsonEncode({
-        'updatedAt': DateTime.now().millisecondsSinceEpoch,
-        'data': merged,
-      }),
-    );
+    final currentWrite = previousWrite == null
+        ? write()
+        : previousWrite.then((_) => write(), onError: (_) => write());
+    _centralEpgCacheWrites[key] = currentWrite;
+    try {
+      await currentWrite;
+    } finally {
+      if (identical(_centralEpgCacheWrites[key], currentWrite)) {
+        _centralEpgCacheWrites.remove(key);
+      }
+    }
   }
 
   static bool _cachedNowNextIsUsable(
@@ -1724,12 +1846,19 @@ class ApiService {
         age < const Duration(hours: 4);
   }
 
+  static DateTime _epgCachedAt(Map<String, dynamic> epg, DateTime fallback) {
+    final timestamp = _intValue(epg['_cachedAt']);
+    return timestamp > 0
+        ? DateTime.fromMillisecondsSinceEpoch(timestamp)
+        : fallback;
+  }
+
   static String _centralLiveEpgCacheKey(IptvServer server) {
     final serverKey = server.id.isNotEmpty ? server.id : server.cleanBaseUrl;
     return '$_liveNowNextCachePrefix:$serverKey';
   }
 
-  static Future<Map<String, Map<String, dynamic>>> _fetchCentralNowNext(
+  static Future<_CentralEpgBatchResult> _fetchCentralNowNext(
     List<IptvContentItem> items,
   ) async {
     final channelIds = items
@@ -1739,12 +1868,25 @@ class ApiService {
         .toList();
     final channels = items.map(_epgLookupChannel).toList();
     if (channelIds.isEmpty && channels.isEmpty) {
-      return const {};
+      return const _CentralEpgBatchResult(success: true, data: {});
     }
 
+    final stopwatch = Stopwatch()..start();
+    var statusCode = 0;
+    var responseBytes = 0;
+    var matched = 0;
+    var encoding = 'identity';
+    var authMode = 'none';
+    var available = false;
+    var source = 'unknown';
     try {
       final headers = await _epgRequestHeaders();
-      final response = await http
+      authMode = headers.containsKey('Authorization')
+          ? 'bearer'
+          : headers.containsKey('X-Server-Id')
+              ? 'server'
+              : 'none';
+      final response = await _epgHttpClient
           .post(
             Uri.parse('$baseUrl/epg/now-next'),
             headers: headers,
@@ -1754,12 +1896,18 @@ class ApiService {
             }),
           )
           .timeout(const Duration(seconds: 7));
+      statusCode = response.statusCode;
+      responseBytes = response.bodyBytes.length;
+      encoding = response.headers['content-encoding'] ?? 'identity';
 
       final decoded = _decodeObject(response.body);
+      available = decoded['available'] == true;
+      source = _stringValue(decoded['source'], fallback: 'unknown');
       if (response.statusCode < 200 ||
           response.statusCode >= 300 ||
-          decoded['success'] != true) {
-        return const {};
+          decoded['success'] != true ||
+          decoded['available'] == false) {
+        return const _CentralEpgBatchResult(success: false, data: {});
       }
 
       final data = decoded['data'];
@@ -1779,8 +1927,11 @@ class ApiService {
           for (final channelId in _epgResponseIds(epg)) {
             result[channelId] = epg;
           }
+          if (_hasNowNextData(epg)) {
+            matched++;
+          }
         }
-        return result;
+        return _CentralEpgBatchResult(success: true, data: result);
       }
 
       if (data is Map) {
@@ -1797,13 +1948,25 @@ class ApiService {
           for (final channelId in _epgResponseIds(epg)) {
             result[channelId] = epg;
           }
+          if (_hasNowNextData(epg)) {
+            matched++;
+          }
         }
-        return result;
+        return _CentralEpgBatchResult(success: true, data: result);
       }
 
-      return const {};
+      return const _CentralEpgBatchResult(success: false, data: {});
     } catch (_) {
-      return const {};
+      return const _CentralEpgBatchResult(success: false, data: {});
+    } finally {
+      if (epgDiagnosticsEnabled) {
+        debugPrint(
+          'EPG central channels=${channels.length} matched=$matched '
+          'status=$statusCode elapsedMs=${stopwatch.elapsedMilliseconds} '
+          'decodedBytes=$responseBytes encoding=$encoding '
+          'auth=$authMode available=$available source=$source',
+        );
+      }
     }
   }
 
@@ -1826,10 +1989,33 @@ class ApiService {
     final serverId = prefs.getString('selected_server_id') ?? '';
     return {
       'Content-Type': 'application/json',
-      if (token.isNotEmpty && token != 'authenticated')
+      if (token.isNotEmpty && token != 'authenticated' && !_isExpiredJwt(token))
         'Authorization': 'Bearer $token',
       if (serverId.isNotEmpty) 'X-Server-Id': serverId,
     };
+  }
+
+  static bool _isExpiredJwt(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) {
+      return false;
+    }
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      if (payload is! Map) {
+        return false;
+      }
+      final expiresAt = payload['exp'];
+      if (expiresAt is! num) {
+        return false;
+      }
+      final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return expiresAt <= nowSeconds + 30;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Map<String, dynamic> _epgLookupChannel(IptvContentItem item) {
@@ -1934,6 +2120,19 @@ class ApiService {
     for (final id in _epgLookupIds(item)) {
       final epg = epgByChannel[id];
       if (epg != null && _hasNowNextData(epg)) {
+        return epg;
+      }
+    }
+    return null;
+  }
+
+  static Map<String, dynamic>? _epgRowForItem(
+    IptvContentItem item,
+    Map<String, Map<String, dynamic>> epgByChannel,
+  ) {
+    for (final id in _epgLookupIds(item)) {
+      final epg = epgByChannel[id];
+      if (epg != null) {
         return epg;
       }
     }
