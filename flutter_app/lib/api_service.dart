@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -179,6 +180,11 @@ class _CentralEpgBatchResult {
 }
 
 class ApiService {
+  static const String allServersUnavailableMessage =
+      'Serviço indisponível no momento. Tente novamente mais tarde ou '
+      'entre em contato com o revendedor ou provedor do serviço.';
+  static DateTime? _lastSessionRefreshAttemptAt;
+  static DateTime? _loginRetryAfterUntil;
   static const Duration _requestTimeout = Duration(seconds: 15);
   static const Duration _loginTimeout = Duration(seconds: 30);
   static const Duration _sessionValidationTimeout = Duration(seconds: 12);
@@ -188,10 +194,14 @@ class ApiService {
       'provider_license_status_next_check_at';
   static const String _providerStatusCodeKey = 'provider_license_status_code';
   static const String _authorizationNoticeKey = 'authorization_notice';
+  static const String _appLoginLicenseCodeKey = 'app_login_license_code';
+  static const String _appLoginUsernameKey = 'app_login_username';
+  static const String _appLoginPasswordKey = 'app_login_password';
   static const String _authorizationDeniedMessage =
       'Seu acesso não está autorizado. Entre em contato com o revendedor ou '
       'provedor do serviço.';
   static final Map<String, Future<bool>> _providerStatusChecksInFlight = {};
+  static final Map<String, Future<bool>> _deviceSessionChecksInFlight = {};
   static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
   static const Duration _liveNowNextRefreshInterval = Duration(hours: 20);
   static const Duration _missingLiveEpgRefreshInterval = Duration(minutes: 30);
@@ -237,8 +247,16 @@ class ApiService {
         .timeout(_loginTimeout);
 
     final decoded = _decodeObject(response.body);
-    if (response.statusCode == 200) {
+    if (response.statusCode == 200 &&
+        decoded['success'] == true &&
+        decoded['servers'] is List &&
+        (decoded['servers'] as List).isNotEmpty) {
       await _saveSessionPayload(decoded);
+      await _saveAppLoginCredentials(
+        licenseCode: licenseCode,
+        username: username,
+        password: password,
+      );
 
       return decoded;
     }
@@ -360,15 +378,11 @@ class ApiService {
       throw Exception('Servidor nao configurado. Faca login novamente.');
     }
 
-    var triedRefreshAfterError = refreshServersFirst;
-    Object? lastError;
-
+    var triedRefreshAfterError = false;
     while (true) {
       final orderedServers = await _orderedServersForFailover(servers);
       for (final server in orderedServers) {
         if (!_hasRequiredServerCredentials(server)) {
-          lastError = Exception(
-              'Credenciais Xtream nao encontradas para este servidor.');
           continue;
         }
 
@@ -391,20 +405,18 @@ class ApiService {
             movies: secondaryCatalogs[0],
             series: secondaryCatalogs[1],
           );
-        } catch (error) {
-          lastError = error;
-        }
+        } catch (_) {}
       }
 
       if (triedRefreshAfterError) {
-        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+        throw Exception(allServersUnavailableMessage);
       }
 
       triedRefreshAfterError = true;
       await _tryRefreshSavedSession(deviceId: deviceId);
       final refreshedServers = await getSavedServers();
       if (refreshedServers.isEmpty) {
-        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+        throw Exception(allServersUnavailableMessage);
       }
       servers = refreshedServers;
     }
@@ -427,26 +439,98 @@ class ApiService {
   static Future<bool> refreshSavedSession({
     String deviceId = '',
     bool logoutOnRevoked = true,
+    Duration? minInterval,
+    http.Client? client,
   }) async {
     final normalizedDeviceId = _stringValue(deviceId);
     if (normalizedDeviceId.isEmpty) {
       return false;
     }
 
-    final response = await http
-        .post(
-          Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Device-Id': normalizedDeviceId,
-          },
-          body: jsonEncode({'deviceId': normalizedDeviceId}),
-        )
-        .timeout(_sessionValidationTimeout);
+    final now = DateTime.now();
+    if (minInterval != null &&
+        _lastSessionRefreshAttemptAt != null &&
+        now.difference(_lastSessionRefreshAttemptAt!) < minInterval) {
+      return false;
+    }
+    _lastSessionRefreshAttemptAt = now;
+
+    final prefs = await SharedPreferences.getInstance();
+    final savedLogin = _savedAppLoginCredentials(prefs);
+    final user = _savedUserData(prefs);
+    final providerCode = _stringValue(
+      user?['provider_code'] ??
+          user?['providerCode'] ??
+          _providerCodeFromJwt(prefs.getString('auth_token') ?? ''),
+    );
+    final isProvider = providerCode.isNotEmpty;
+    var loginLicenseCode = savedLogin?.licenseCode ?? '';
+    var loginUsername = savedLogin?.username ?? '';
+    var loginPassword = savedLogin?.password ?? '';
+    if (loginLicenseCode.isEmpty && isProvider) {
+      final server = await getActiveServer();
+      if (server != null && _hasRequiredServerCredentials(server)) {
+        loginLicenseCode = providerCode;
+        loginUsername = server.username;
+        loginPassword = server.password;
+      }
+    }
+    final usesAppLogin = loginLicenseCode.isNotEmpty &&
+        loginUsername.isNotEmpty &&
+        loginPassword.isNotEmpty;
+    if (usesAppLogin &&
+        _loginRetryAfterUntil != null &&
+        now.isBefore(_loginRetryAfterUntil!)) {
+      return false;
+    }
+
+    final uri = Uri.parse(usesAppLogin
+        ? '$baseUrl/v1/auth/app/login'
+        : '$appBaseUrl/v1/auth/app/device-login');
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      if (!usesAppLogin) 'X-Device-Id': normalizedDeviceId,
+    };
+    final body = jsonEncode(usesAppLogin
+        ? {
+            'licenseCode': loginLicenseCode,
+            'username': loginUsername,
+            'password': loginPassword,
+            'deviceId': normalizedDeviceId,
+          }
+        : {'deviceId': normalizedDeviceId});
+
+    final response = await (client == null
+            ? http.post(uri, headers: headers, body: body)
+            : client.post(uri, headers: headers, body: body))
+        .timeout(usesAppLogin ? _loginTimeout : _sessionValidationTimeout);
 
     final decoded = _decodeObject(response.body);
-    if (response.statusCode == 200 && decoded['success'] == true) {
+    if (usesAppLogin && response.statusCode == 429) {
+      final retryAfter = response.headers['retry-after'];
+      final delaySeconds = int.tryParse(retryAfter ?? '');
+      if (delaySeconds != null) {
+        _loginRetryAfterUntil =
+            DateTime.now().add(Duration(seconds: delaySeconds.clamp(1, 3600)));
+      } else {
+        try {
+          _loginRetryAfterUntil = HttpDate.parse(retryAfter ?? '');
+        } catch (_) {
+          _loginRetryAfterUntil = null;
+        }
+      }
+      return false;
+    }
+    if (response.statusCode == 200 &&
+        decoded['success'] == true &&
+        (!usesAppLogin ||
+            (decoded['servers'] is List &&
+                (decoded['servers'] as List).isNotEmpty))) {
       await _saveSessionPayload(decoded);
+      if (usesAppLogin) {
+        _loginRetryAfterUntil = null;
+      }
       return true;
     }
 
@@ -455,6 +539,11 @@ class ApiService {
     if (logoutOnRevoked &&
         _isSessionRevokedResponse(response.statusCode, code, error)) {
       await logout();
+      final refreshedPrefs = await SharedPreferences.getInstance();
+      await refreshedPrefs.setString(
+        _authorizationNoticeKey,
+        _authorizationDeniedMessage,
+      );
     }
     return false;
   }
@@ -964,6 +1053,9 @@ class ApiService {
     await prefs.remove(_providerStatusNextCheckKey);
     await prefs.remove(_providerStatusCodeKey);
     await prefs.remove(_authorizationNoticeKey);
+    await prefs.remove(_appLoginLicenseCodeKey);
+    await prefs.remove(_appLoginUsernameKey);
+    await prefs.remove(_appLoginPasswordKey);
   }
 
   static Future<String?> consumeAuthorizationNotice() async {
@@ -1030,6 +1122,9 @@ class ApiService {
           client: client,
         );
       }
+      if (_savedAppLoginCredentials(prefs) != null) {
+        return true;
+      }
     }
 
     if (!revalidateWithServer ||
@@ -1038,17 +1133,49 @@ class ApiService {
       return true;
     }
 
+    final normalizedDeviceId = _stringValue(deviceId);
+    final existing = _deviceSessionChecksInFlight[normalizedDeviceId];
+    if (existing != null) {
+      return existing;
+    }
+
+    final check = _validateWithDeviceLogin(
+      normalizedDeviceId,
+      client: client,
+    );
+    _deviceSessionChecksInFlight[normalizedDeviceId] = check;
     try {
-      final response = await http
-          .post(
-            Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Device-Id': _stringValue(deviceId),
-            },
-            body: jsonEncode({'deviceId': deviceId}),
-          )
-          .timeout(_sessionValidationTimeout);
+      return await check;
+    } finally {
+      if (identical(_deviceSessionChecksInFlight[normalizedDeviceId], check)) {
+        _deviceSessionChecksInFlight.remove(normalizedDeviceId);
+      }
+    }
+  }
+
+  static Future<bool> _validateWithDeviceLogin(
+    String deviceId, {
+    http.Client? client,
+  }) async {
+    try {
+      final request = client == null
+          ? http.post(
+              Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Device-Id': deviceId,
+              },
+              body: jsonEncode({'deviceId': deviceId}),
+            )
+          : client.post(
+              Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Device-Id': deviceId,
+              },
+              body: jsonEncode({'deviceId': deviceId}),
+            );
+      final response = await request.timeout(_sessionValidationTimeout);
 
       final decoded = _decodeObject(response.body);
       if (response.statusCode == 200 && decoded['success'] == true) {
@@ -1072,9 +1199,9 @@ class ApiService {
         return false;
       }
 
-      return localValid;
+      return isSavedSessionLocallyValid();
     } catch (_) {
-      return localValid;
+      return isSavedSessionLocallyValid();
     }
   }
 
@@ -1257,16 +1384,21 @@ class ApiService {
     if (deviceId.isEmpty) {
       return (token: null, denied: false);
     }
-    final server = await getActiveServer();
-    if (server == null || !_hasRequiredServerCredentials(server)) {
+    final prefs = await SharedPreferences.getInstance();
+    final savedLogin = _savedAppLoginCredentials(prefs);
+    final server = savedLogin == null ? await getActiveServer() : null;
+    final username = savedLogin?.username ?? server?.username ?? '';
+    final password = savedLogin?.password ?? server?.password ?? '';
+    final licenseCode = savedLogin?.licenseCode ?? providerCode;
+    if (licenseCode.isEmpty || username.isEmpty || password.isEmpty) {
       return (token: null, denied: false);
     }
 
     final uri = Uri.parse('$baseUrl/v1/auth/app/login');
     final body = jsonEncode({
-      'licenseCode': providerCode,
-      'username': server.username,
-      'password': server.password,
+      'licenseCode': licenseCode,
+      'username': username,
+      'password': password,
       'deviceId': deviceId,
     });
     final request = client == null
@@ -1307,7 +1439,6 @@ class ApiService {
       return (token: null, denied: false);
     }
 
-    final prefs = await SharedPreferences.getInstance();
     if (prefs.getString('auth_token') != oldToken) {
       return (token: null, denied: false);
     }
@@ -1328,6 +1459,28 @@ class ApiService {
 
     if (decoded['servers'] != null) {
       await prefs.setString('servers_data', jsonEncode(decoded['servers']));
+      final servers = await getSavedServers();
+      if (servers.isNotEmpty) {
+        final selected = decoded['selected_server'];
+        IptvServer? target;
+        if (selected is Map) {
+          final selectedId = _stringValue(selected['id']);
+          final rawSelectedUrl =
+              _stringValue(selected['url'] ?? selected['server_url']);
+          final selectedUrl =
+              rawSelectedUrl.isEmpty ? '' : _cleanBaseUrl(rawSelectedUrl);
+          for (final server in servers) {
+            if ((selectedId.isNotEmpty && server.id == selectedId) ||
+                (selectedUrl.isNotEmpty &&
+                    server.cleanBaseUrl == selectedUrl)) {
+              target = server;
+              break;
+            }
+          }
+        }
+        target ??= await getActiveServer();
+        await selectActiveServer(target ?? servers.first);
+      }
     }
 
     final token = _stringValue(
@@ -1339,6 +1492,32 @@ class ApiService {
     await prefs.setString(
       'auth_token',
       token.isNotEmpty ? token : 'authenticated',
+    );
+  }
+
+  static Future<void> _saveAppLoginCredentials({
+    required String licenseCode,
+    required String username,
+    required String password,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_appLoginLicenseCodeKey, licenseCode.trim());
+    await prefs.setString(_appLoginUsernameKey, username.trim());
+    await prefs.setString(_appLoginPasswordKey, password);
+  }
+
+  static ({String licenseCode, String username, String password})?
+      _savedAppLoginCredentials(SharedPreferences prefs) {
+    final licenseCode = prefs.getString(_appLoginLicenseCodeKey)?.trim() ?? '';
+    final username = prefs.getString(_appLoginUsernameKey)?.trim() ?? '';
+    final password = prefs.getString(_appLoginPasswordKey) ?? '';
+    if (licenseCode.isEmpty || username.isEmpty || password.isEmpty) {
+      return null;
+    }
+    return (
+      licenseCode: licenseCode,
+      username: username,
+      password: password,
     );
   }
 

@@ -26,10 +26,21 @@ void main() async {
   ]);
 
   final deviceId = await DeviceInfoHelper.getDeviceId();
-  final hasSavedSession = await ApiService.validateSavedSession(
+  var hasSavedSession = await ApiService.validateSavedSession(
     deviceId: deviceId,
     revalidateWithServer: true,
   );
+  if (hasSavedSession) {
+    try {
+      await ApiService.refreshSavedSession(
+        deviceId: deviceId,
+        logoutOnRevoked: true,
+      );
+    } catch (_) {
+      // A temporary API failure must not erase a saved session.
+    }
+    hasSavedSession = await ApiService.isSavedSessionLocallyValid();
+  }
   final initialRoute = hasSavedSession ? '/home' : '/';
 
   runApp(
@@ -153,9 +164,12 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
             final reminderEventId =
                 (args['reminderEventId'] ?? widget.initialReminderEventId)
                     ?.toString();
+            final skipInitialSessionRevalidation =
+                args['skipInitialSessionRevalidation'] == true;
             return MaterialPageRoute(
               builder: (_) => HomeScreen(
                 initialReminderEventId: reminderEventId,
+                skipInitialSessionRevalidation: skipInitialSessionRevalidation,
               ),
             );
           case '/player':

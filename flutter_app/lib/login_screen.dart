@@ -88,6 +88,9 @@ class _LoginScreenState extends State<LoginScreen> {
         deviceId: widget.deviceId,
         deviceInfo: info,
       );
+      if (!mounted) {
+        return;
+      }
 
       final dnsList = response['servers'] as List<dynamic>? ?? [];
 
@@ -103,8 +106,15 @@ class _LoginScreenState extends State<LoginScreen> {
             server['url'] ?? server['baseUrl'] ?? server['server_url'] ?? '');
         await prefs.setString('selected_server_name',
             server['display_name'] ?? server['name'] ?? 'Servidor');
+        if (!mounted) {
+          return;
+        }
 
-        Navigator.of(context).pushReplacementNamed('/home');
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          '/home',
+          (route) => false,
+          arguments: const {'skipInitialSessionRevalidation': true},
+        );
       } else {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(

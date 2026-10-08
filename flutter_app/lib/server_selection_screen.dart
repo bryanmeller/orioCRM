@@ -21,7 +21,11 @@ class ServerSelectionScreen extends StatelessWidget {
     if (!context.mounted) {
       return;
     }
-    Navigator.of(context).pushReplacementNamed('/home');
+    Navigator.of(context).pushNamedAndRemoveUntil(
+      '/home',
+      (route) => false,
+      arguments: const {'skipInitialSessionRevalidation': true},
+    );
   }
 
   @override

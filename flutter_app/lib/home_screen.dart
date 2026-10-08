@@ -28,8 +28,13 @@ enum HomeSection {
 
 class HomeScreen extends StatefulWidget {
   final String? initialReminderEventId;
+  final bool skipInitialSessionRevalidation;
 
-  const HomeScreen({super.key, this.initialReminderEventId});
+  const HomeScreen({
+    super.key,
+    this.initialReminderEventId,
+    this.skipInitialSessionRevalidation = false,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -95,7 +100,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     };
     _searchFocusNode.addListener(_handleSearchFocusChange);
     _pendingReminderEventId = widget.initialReminderEventId;
-    _loadHome();
+    _loadHome(
+      revalidateWithServer: !widget.skipInitialSessionRevalidation,
+    );
   }
 
   @override
@@ -141,6 +148,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _refreshEpgAfterSessionValidation() async {
     final valid = await _validateActiveSessionOrExit();
     if (valid && mounted && !_loading) {
+      final previousServer = await ApiService.getActiveServer();
+      try {
+        final deviceId = await DeviceInfoHelper.getDeviceId();
+        final refreshed = await ApiService.refreshSavedSession(
+          deviceId: deviceId,
+          logoutOnRevoked: false,
+          minInterval: const Duration(minutes: 1),
+        );
+        final currentServer = await ApiService.getActiveServer();
+        if (refreshed &&
+            (previousServer?.id != currentServer?.id ||
+                previousServer?.cleanBaseUrl != currentServer?.cleanBaseUrl)) {
+          if (mounted) {
+            await _loadHome();
+          }
+          return;
+        }
+      } catch (_) {
+        // Keep the current catalog when the refresh service is offline.
+      }
       await _refreshLiveEpgCacheInBackground();
     }
   }
@@ -154,7 +181,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _loadHome({bool refreshServersFirst = false}) async {
+  Future<void> _loadHome({
+    bool refreshServersFirst = false,
+    bool revalidateWithServer = true,
+  }) async {
     final loadToken = ++_homeLoadToken;
     _liveEpgRefreshToken++;
     _liveEpgRetryTimer?.cancel();
@@ -165,7 +195,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     try {
       final sessionValid = await _validateActiveSessionOrExit(
-        revalidateWithServer: !refreshServersFirst,
+        revalidateWithServer: revalidateWithServer && !refreshServersFirst,
       );
       if (!sessionValid || !mounted) {
         return;
@@ -572,15 +602,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _handleChangeServer() async {
+    final previousServer = await ApiService.getActiveServer();
+    var listRefreshed = false;
+    try {
+      final deviceId = await DeviceInfoHelper.getDeviceId();
+      listRefreshed = await ApiService.refreshSavedSession(
+        deviceId: deviceId,
+        logoutOnRevoked: false,
+      );
+    } catch (_) {
+      // Still allow choosing from the last saved server list.
+    }
     final servers = await ApiService.getSavedServers();
     if (!mounted) {
       return;
     }
 
-    if (servers.length <= 1) {
+    if (servers.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Nao ha outro servidor salvo para selecionar.'),
+          content: Text('Nenhum servidor autorizado disponivel no momento.'),
           duration: Duration(seconds: 2),
         ),
       );
@@ -598,7 +639,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (context) {
         return AlertDialog(
           backgroundColor: const Color(0xFF101216),
-          title: const Text('Trocar servidor'),
+          title: Text(listRefreshed
+              ? 'Servidores disponiveis'
+              : 'Servidores salvos (lista pode estar desatualizada)'),
           content: SizedBox(
             width: 520,
             height: (servers.length * 58.0).clamp(120.0, 320.0),
@@ -657,6 +700,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ),
           actions: [
+            if (servers.length == 1)
+              const Padding(
+                padding: EdgeInsets.only(right: 12),
+                child: Text('Somente este servidor foi autorizado.'),
+              ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
               child: const Text('Cancelar'),
@@ -667,6 +715,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
 
     if (selectedServer == null || !mounted) {
+      final currentServer = await ApiService.getActiveServer();
+      if (mounted &&
+          (previousServer?.id != currentServer?.id ||
+              previousServer?.cleanBaseUrl != currentServer?.cleanBaseUrl)) {
+        await _loadHome();
+      }
       return;
     }
 
@@ -686,7 +740,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _seriesCatalog = const IptvCatalog(categories: [], items: []);
       _continueWatchingItems = const [];
     });
-    await _loadHome(refreshServersFirst: true);
+    await _loadHome();
   }
 
   Future<void> _confirmExitApp() async {
