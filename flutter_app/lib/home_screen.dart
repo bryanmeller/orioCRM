@@ -60,10 +60,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   IptvCatalog _liveCatalog = const IptvCatalog(categories: [], items: []);
   IptvCatalog _movieCatalog = const IptvCatalog(categories: [], items: []);
   IptvCatalog _seriesCatalog = const IptvCatalog(categories: [], items: []);
+  IptvCatalog? _visibleLiveCatalogCache;
+  IptvCatalog? _visibleLiveCatalogSource;
+  IptvCatalog? _visibleMovieCatalogCache;
+  IptvCatalog? _visibleMovieCatalogSource;
   List<ContinueWatchingItem> _continueWatchingItems = const [];
   final Set<String> _favorites = {};
   DateTime? _lastHomeBackPress;
-  bool _sidebarExpanded = true;
+  final ValueNotifier<bool> _sidebarExpanded = ValueNotifier(true);
   bool _adultContentBlocked = true;
   String? _pendingReminderEventId;
   final Set<String> _activeReminderIds = {};
@@ -122,6 +126,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       node.dispose();
     }
     _searchFocusNode.dispose();
+    _sidebarExpanded.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -188,11 +193,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return;
       }
 
+      final visibleLive = adultContentBlocked
+          ? _withoutAdultCategories(catalogs.live)
+          : catalogs.live;
+      final visibleMovies = adultContentBlocked
+          ? _withoutAdultCategories(catalogs.movies)
+          : catalogs.movies;
       setState(() {
         _serverName = catalogs.server.name;
         _liveCatalog = catalogs.live;
         _movieCatalog = catalogs.movies;
         _seriesCatalog = catalogs.series;
+        _visibleLiveCatalogSource = adultContentBlocked ? catalogs.live : null;
+        _visibleLiveCatalogCache = adultContentBlocked ? visibleLive : null;
+        _visibleMovieCatalogSource =
+            adultContentBlocked ? catalogs.movies : null;
+        _visibleMovieCatalogCache = adultContentBlocked ? visibleMovies : null;
         _continueWatchingItems = continueWatching;
         _adultContentBlocked = adultContentBlocked;
         _favorites
@@ -757,15 +773,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   IptvCatalog get _visibleLiveCatalog {
-    return _adultContentBlocked
-        ? _withoutAdultCategories(_liveCatalog)
-        : _liveCatalog;
+    if (!_adultContentBlocked) {
+      return _liveCatalog;
+    }
+    if (!identical(_visibleLiveCatalogSource, _liveCatalog) ||
+        _visibleLiveCatalogCache == null) {
+      _visibleLiveCatalogSource = _liveCatalog;
+      _visibleLiveCatalogCache = _withoutAdultCategories(_liveCatalog);
+    }
+    return _visibleLiveCatalogCache!;
   }
 
   IptvCatalog get _visibleMovieCatalog {
-    return _adultContentBlocked
-        ? _withoutAdultCategories(_movieCatalog)
-        : _movieCatalog;
+    if (!_adultContentBlocked) {
+      return _movieCatalog;
+    }
+    if (!identical(_visibleMovieCatalogSource, _movieCatalog) ||
+        _visibleMovieCatalogCache == null) {
+      _visibleMovieCatalogSource = _movieCatalog;
+      _visibleMovieCatalogCache = _withoutAdultCategories(_movieCatalog);
+    }
+    return _visibleMovieCatalogCache!;
   }
 
   IptvCatalog _withoutAdultCategories(IptvCatalog catalog) {
@@ -802,13 +830,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     setState(() {
       _activeSection = section;
-      _sidebarExpanded = false;
       _selectedCategory = 'todos';
       _searchQuery = '';
       _searchController.clear();
       final catalog = _activeCatalog;
       _selectedItem = catalog.items.isNotEmpty ? catalog.items.first : null;
     });
+    _sidebarExpanded.value = false;
     _scrollCurrentContentToTop();
 
     if (_loading) {
@@ -827,15 +855,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _expandSidebar() {
-    if (!_sidebarExpanded) {
-      setState(() => _sidebarExpanded = true);
-    }
+    _sidebarExpanded.value = true;
   }
 
   void _collapseSidebar() {
-    if (_sidebarExpanded) {
-      setState(() => _sidebarExpanded = false);
-    }
+    _sidebarExpanded.value = false;
   }
 
   bool _isSidebarFocused() {
@@ -1628,27 +1652,45 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           child: TvOverscanSafeArea(
             backgroundColor: const Color(0xFF070708),
-            child: Row(
+            child: Stack(
               children: [
-                _buildSidebar(),
-                Expanded(
-                  child: FocusScope(
-                    onFocusChange: (focused) {
-                      if (focused) {
-                        _collapseSidebar();
-                      }
-                    },
-                    child: Container(
-                      color: const Color(0xFF070708),
-                      child: Column(
-                        children: [
-                          _buildTopBar(),
-                          Expanded(
-                            child: _loading ? _buildLoading() : _buildContent(),
+                Row(
+                  children: [
+                    const SizedBox(width: 72),
+                    Expanded(
+                      child: RepaintBoundary(
+                        child: FocusScope(
+                          onFocusChange: (focused) {
+                            if (focused) {
+                              _collapseSidebar();
+                            }
+                          },
+                          child: Container(
+                            color: const Color(0xFF070708),
+                            child: Column(
+                              children: [
+                                _buildTopBar(),
+                                Expanded(
+                                  child: _loading
+                                      ? _buildLoading()
+                                      : _buildContent(),
+                                ),
+                              ],
+                            ),
                           ),
-                        ],
+                        ),
                       ),
                     ),
+                  ],
+                ),
+                Positioned(
+                  top: 0,
+                  bottom: 0,
+                  left: 0,
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: _sidebarExpanded,
+                    builder: (context, expanded, child) =>
+                        _buildSidebar(expanded),
                   ),
                 ),
               ],
@@ -1659,9 +1701,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildSidebar() {
-    final expanded = _sidebarExpanded;
-
+  Widget _buildSidebar(bool expanded) {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
