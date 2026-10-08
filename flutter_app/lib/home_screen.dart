@@ -43,6 +43,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   HomeSection _activeSection = HomeSection.home;
   String _serverName = 'Carregando...';
+  String _licenseExpirationLabel = '';
   String? _errorMessage;
   bool _loading = true;
   String _selectedCategory = 'todos';
@@ -165,6 +166,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           }
           return;
         }
+        if (refreshed) {
+          await _refreshLicenseExpirationLabel();
+        }
       } catch (_) {
         // Keep the current catalog when the refresh service is offline.
       }
@@ -218,6 +222,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         deviceId: deviceId,
         refreshServersFirst: refreshServersFirst,
       );
+      final licenseDisplayInfo = await ApiService.getSavedLicenseDisplayInfo();
 
       if (!mounted || loadToken != _homeLoadToken) {
         return;
@@ -231,6 +236,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           : catalogs.movies;
       setState(() {
         _serverName = catalogs.server.name;
+        _licenseExpirationLabel = _formatLicenseExpiration(
+          licenseDisplayInfo.expiresAt,
+          licenseDisplayInfo.preferredLanguage,
+        );
         _liveCatalog = catalogs.live;
         _movieCatalog = catalogs.movies;
         _seriesCatalog = catalogs.series;
@@ -591,6 +600,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return 'Tempo limite ao consultar o servidor. Tente novamente ou troque de servidor.';
     }
     return message;
+  }
+
+  String _formatLicenseExpiration(DateTime? expiresAt, String language) {
+    if (expiresAt == null) {
+      return '';
+    }
+    final localDate = expiresAt.toLocal();
+    final day = localDate.day.toString().padLeft(2, '0');
+    final month = localDate.month.toString().padLeft(2, '0');
+    final year = localDate.year.toString();
+    return language == 'en' ? '$month/$day/$year' : '$day/$month/$year';
+  }
+
+  Future<void> _refreshLicenseExpirationLabel() async {
+    final info = await ApiService.getSavedLicenseDisplayInfo();
+    if (!mounted) {
+      return;
+    }
+    final label = _formatLicenseExpiration(
+      info.expiresAt,
+      info.preferredLanguage,
+    );
+    if (label != _licenseExpirationLabel) {
+      setState(() => _licenseExpirationLabel = label);
+    }
   }
 
   Future<void> _handleLogout() async {
@@ -1962,11 +1996,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  'Servidor: $_serverName',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                Row(
+                  children: [
+                    if (_licenseExpirationLabel.isNotEmpty) ...[
+                      Text(
+                        'License App: $_licenseExpirationLabel',
+                        maxLines: 1,
+                        style: const TextStyle(
+                          color: Color(0xFFB8A0FF),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      const Text(
+                        '•',
+                        style: TextStyle(color: Colors.white24, fontSize: 9),
+                      ),
+                      const SizedBox(width: 10),
+                    ],
+                    Expanded(
+                      child: Text(
+                        'Servidor: $_serverName',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),

@@ -1072,6 +1072,20 @@ class ApiService {
     return prefs.getString('auth_token');
   }
 
+  static Future<({DateTime? expiresAt, String preferredLanguage})>
+      getSavedLicenseDisplayInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    final license = _savedLicenseData(prefs);
+    final user = _savedUserData(prefs);
+    final preferredLanguage =
+        _stringValue(user?['preferred_language']).toLowerCase();
+    final expiresAt = license == null ? null : _sessionExpiryDate(license);
+    return (
+      expiresAt: expiresAt ?? (user == null ? null : _sessionExpiryDate(user)),
+      preferredLanguage: preferredLanguage.startsWith('en') ? 'en' : 'pt',
+    );
+  }
+
   static Future<bool> hasSavedSession() async {
     return isSavedSessionLocallyValid();
   }
