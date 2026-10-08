@@ -182,6 +182,16 @@ class ApiService {
   static const Duration _requestTimeout = Duration(seconds: 15);
   static const Duration _loginTimeout = Duration(seconds: 30);
   static const Duration _sessionValidationTimeout = Duration(seconds: 12);
+  static const Duration _providerStatusTimeout = Duration(seconds: 7);
+  static const Duration _providerStatusDefaultInterval = Duration(days: 1);
+  static const String _providerStatusNextCheckKey =
+      'provider_license_status_next_check_at';
+  static const String _providerStatusCodeKey = 'provider_license_status_code';
+  static const String _authorizationNoticeKey = 'authorization_notice';
+  static const String _authorizationDeniedMessage =
+      'Seu acesso não está autorizado. Entre em contato com o revendedor ou '
+      'provedor do serviço.';
+  static final Map<String, Future<bool>> _providerStatusChecksInFlight = {};
   static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
   static const Duration _liveNowNextRefreshInterval = Duration(hours: 20);
   static const Duration _missingLiveEpgRefreshInterval = Duration(minutes: 30);
@@ -214,7 +224,7 @@ class ApiService {
   }) async {
     final response = await http
         .post(
-          Uri.parse('$appBaseUrl/v1/auth/app/login'),
+          Uri.parse('$baseUrl/v1/auth/app/login'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'licenseCode': licenseCode,
@@ -951,6 +961,18 @@ class ApiService {
     await prefs.remove('selected_server_url');
     await prefs.remove('selected_server_name');
     await prefs.remove(_continueWatchingKey);
+    await prefs.remove(_providerStatusNextCheckKey);
+    await prefs.remove(_providerStatusCodeKey);
+    await prefs.remove(_authorizationNoticeKey);
+  }
+
+  static Future<String?> consumeAuthorizationNotice() async {
+    final prefs = await SharedPreferences.getInstance();
+    final notice = prefs.getString(_authorizationNoticeKey);
+    if (notice != null) {
+      await prefs.remove(_authorizationNoticeKey);
+    }
+    return notice;
   }
 
   static Future<String?> getToken() async {
@@ -986,10 +1008,28 @@ class ApiService {
   static Future<bool> validateSavedSession({
     String? deviceId,
     bool revalidateWithServer = false,
+    http.Client? client,
   }) async {
     final localValid = await isSavedSessionLocallyValid();
     if (!localValid) {
       return false;
+    }
+
+    if (revalidateWithServer) {
+      final prefs = await SharedPreferences.getInstance();
+      final user = _savedUserData(prefs);
+      final providerCode = _stringValue(
+        user?['provider_code'] ??
+            user?['providerCode'] ??
+            _providerCodeFromJwt(prefs.getString('auth_token') ?? ''),
+      );
+      if (providerCode.isNotEmpty) {
+        return _validateProviderStatus(
+          providerCode,
+          deviceId: _stringValue(deviceId),
+          client: client,
+        );
+      }
     }
 
     if (!revalidateWithServer ||
@@ -1036,6 +1076,243 @@ class ApiService {
     } catch (_) {
       return localValid;
     }
+  }
+
+  static Future<bool> _validateProviderStatus(
+    String providerCode, {
+    required String deviceId,
+    http.Client? client,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token') ?? '';
+
+    final nextCheckAt = prefs.getInt(_providerStatusNextCheckKey) ?? 0;
+    if (token.isNotEmpty &&
+        token != 'authenticated' &&
+        prefs.getString(_providerStatusCodeKey) == providerCode &&
+        nextCheckAt > DateTime.now().millisecondsSinceEpoch) {
+      return true;
+    }
+
+    final key = jsonEncode([providerCode, token]);
+    final existing = _providerStatusChecksInFlight[key];
+    if (existing != null) {
+      return existing;
+    }
+
+    final check = _performProviderStatusCheck(
+      providerCode,
+      token,
+      deviceId: deviceId,
+      client: client,
+    );
+    _providerStatusChecksInFlight[key] = check;
+    try {
+      return await check;
+    } finally {
+      if (identical(_providerStatusChecksInFlight[key], check)) {
+        _providerStatusChecksInFlight.remove(key);
+      }
+    }
+  }
+
+  static String _providerCodeFromJwt(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) {
+      return '';
+    }
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      if (payload is! Map) {
+        return '';
+      }
+      return _stringValue(payload['providerCode'] ?? payload['provider_code']);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  static Future<bool> _performProviderStatusCheck(
+    String providerCode,
+    String savedToken, {
+    required String deviceId,
+    http.Client? client,
+  }) async {
+    var token = savedToken;
+    try {
+      if (token.isEmpty || token == 'authenticated' || _isExpiredJwt(token)) {
+        final renewed = await _renewProviderToken(
+          providerCode,
+          token,
+          deviceId: deviceId,
+          client: client,
+        );
+        if (renewed.denied) {
+          return _revokeProviderAccessIfCurrent(token);
+        }
+        if (renewed.token == null) {
+          return true;
+        }
+        token = renewed.token!;
+      }
+
+      var response = await _requestProviderStatus(
+        providerCode,
+        token,
+        client: client,
+      );
+      if (response.statusCode == 401 && token == savedToken) {
+        final renewed = await _renewProviderToken(
+          providerCode,
+          token,
+          deviceId: deviceId,
+          client: client,
+        );
+        if (renewed.denied) {
+          return _revokeProviderAccessIfCurrent(token);
+        }
+        if (renewed.token == null) {
+          return true;
+        }
+        token = renewed.token!;
+        response = await _requestProviderStatus(
+          providerCode,
+          token,
+          client: client,
+        );
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getString('auth_token') != token) {
+        return isSavedSessionLocallyValid();
+      }
+
+      final decoded = _decodeObject(response.body);
+      if (decoded['access_allowed'] == false || response.statusCode == 403) {
+        return _revokeProviderAccessIfCurrent(token);
+      }
+
+      if (response.statusCode == 200 && decoded['access_allowed'] == true) {
+        final requestedSeconds = _intValue(decoded['next_check_seconds']);
+        final intervalSeconds = requestedSeconds > 0
+            ? requestedSeconds.clamp(300, 86400)
+            : _providerStatusDefaultInterval.inSeconds;
+        await prefs.setString(_providerStatusCodeKey, providerCode);
+        await prefs.setInt(
+          _providerStatusNextCheckKey,
+          DateTime.now()
+              .add(Duration(seconds: intervalSeconds))
+              .millisecondsSinceEpoch,
+        );
+      }
+      return true;
+    } catch (_) {
+      return true; // Offline/5xx is not evidence that access was revoked.
+    }
+  }
+
+  static Future<bool> _revokeProviderAccessIfCurrent(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString('auth_token') != token) {
+      return isSavedSessionLocallyValid();
+    }
+    await logout();
+    await prefs.setString(_authorizationNoticeKey, _authorizationDeniedMessage);
+    return false;
+  }
+
+  static Future<http.Response> _requestProviderStatus(
+    String providerCode,
+    String token, {
+    http.Client? client,
+  }) {
+    final request = client == null
+        ? http.post(
+            Uri.parse('$baseUrl/v1/provider/license/status'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'providerCode': providerCode}),
+          )
+        : client.post(
+            Uri.parse('$baseUrl/v1/provider/license/status'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'providerCode': providerCode}),
+          );
+    return request.timeout(_providerStatusTimeout);
+  }
+
+  static Future<({String? token, bool denied})> _renewProviderToken(
+    String providerCode,
+    String oldToken, {
+    required String deviceId,
+    http.Client? client,
+  }) async {
+    if (deviceId.isEmpty) {
+      return (token: null, denied: false);
+    }
+    final server = await getActiveServer();
+    if (server == null || !_hasRequiredServerCredentials(server)) {
+      return (token: null, denied: false);
+    }
+
+    final uri = Uri.parse('$baseUrl/v1/auth/app/login');
+    final body = jsonEncode({
+      'licenseCode': providerCode,
+      'username': server.username,
+      'password': server.password,
+      'deviceId': deviceId,
+    });
+    final request = client == null
+        ? http.post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: body,
+          )
+        : client.post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: body,
+          );
+    final response = await request.timeout(_sessionValidationTimeout);
+    if (response.statusCode != 200) {
+      Map<String, dynamic> decoded;
+      try {
+        decoded = _decodeObject(response.body);
+      } catch (_) {
+        return (token: null, denied: false);
+      }
+      final error = _stringValue(decoded['error']).toLowerCase();
+      final denied = decoded['access_allowed'] == false ||
+          response.statusCode == 403 ||
+          error.contains('não reconhecido') ||
+          error.contains('provedor bloqueado') ||
+          error.contains('provedor inativo');
+      return (token: null, denied: denied);
+    }
+    final decoded = _decodeObject(response.body);
+    final newToken = _stringValue(
+      decoded['token'] ??
+          decoded['authToken'] ??
+          decoded['access_token'] ??
+          decoded['sessionToken'],
+    );
+    if (decoded['success'] != true || newToken.isEmpty) {
+      return (token: null, denied: false);
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString('auth_token') != oldToken) {
+      return (token: null, denied: false);
+    }
+    await _saveSessionPayload(decoded);
+    return (token: newToken, denied: false);
   }
 
   static Future<void> _saveSessionPayload(Map<String, dynamic> decoded) async {

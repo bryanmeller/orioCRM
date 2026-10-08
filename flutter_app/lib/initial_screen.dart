@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'device_info.dart';
 import 'api_service.dart';
+import 'authorization_notice.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
@@ -20,6 +21,11 @@ class _InitialScreenState extends State<InitialScreen> {
   void initState() {
     super.initState();
     _loadDeviceId();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        showPendingAuthorizationNotice(context);
+      }
+    });
   }
 
   @override

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:android_tv_text_field/native_textfield_tv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_service.dart';
+import 'authorization_notice.dart';
 import 'server_selection_screen.dart';
 import 'device_info.dart';
 import 'tv_focus.dart';
@@ -33,6 +34,7 @@ class _LoginScreenState extends State<LoginScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
+        showPendingAuthorizationNotice(context);
         FocusScope.of(context).requestFocus(_codeFocusNode);
         Future.delayed(const Duration(milliseconds: 120), () {
           if (mounted) {

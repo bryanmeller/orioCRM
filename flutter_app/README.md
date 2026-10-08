@@ -76,3 +76,7 @@ flutter run --dart-define=EPG_DIAGNOSTICS=true
 ```
 
 Os logs `EPG central` mostram quantidade de canais, correspondências, status HTTP, tempo da chamada, bytes decodificados, `Content-Encoding`, disponibilidade e origem da resposta. Os logs `EPG visible`, `EPG focused` e `EPG background` mostram o tempo até a atualização da interface. Nenhum token ou nome de canal é registrado. Em builds de debug, esses logs já ficam ativos; em outros builds, use a flag acima para ativá-los.
+
+## Verificação de acesso do provedor
+
+Ao abrir ou retomar o app, a sessão de provedor consulta `POST /api/v1/provider/license/status` com o token salvo e o código do provedor. Uma autorização positiva é reutilizada pelo intervalo `next_check_seconds` informado pela API, limitado a no máximo 24 horas. Resposta `access_allowed: false` ou HTTP 403 encerra a sessão e mostra um aviso para contatar o revendedor ou provedor. Falha de rede ou erro temporário não desloga o usuário e a verificação é tentada novamente no próximo acesso. Quando o token vence, o app tenta renová-lo pelo login com as credenciais Xtream já salvas antes da consulta de status.
