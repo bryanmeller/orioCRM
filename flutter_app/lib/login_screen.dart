@@ -7,6 +7,7 @@ import 'server_selection_screen.dart';
 import 'device_info.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
+import 'app_language.dart';
 
 class LoginScreen extends StatefulWidget {
   final String deviceId;
@@ -64,7 +65,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (code.isEmpty || user.isEmpty || pass.isEmpty) {
       setState(() {
-        _errorMessage = 'Preencha todos os campos.';
+        _errorMessage = AppLanguage.text(
+            'Preencha todos os campos.', 'Fill in all fields.');
       });
       return;
     }
@@ -91,12 +93,16 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) {
         return;
       }
+      AppLanguage.updateFromLoginResponse(response);
 
       final dnsList = response['servers'] as List<dynamic>? ?? [];
 
       if (dnsList.isEmpty) {
         setState(() {
-          _errorMessage = 'Nenhum servidor autorizado encontrado.';
+          _errorMessage = AppLanguage.text(
+            'Nenhum servidor autorizado encontrado.',
+            'No authorized server was found.',
+          );
         });
       } else if (dnsList.length == 1) {
         final server = dnsList.first;
@@ -104,8 +110,12 @@ class _LoginScreenState extends State<LoginScreen> {
         await prefs.setString('selected_server_id', server['id'] ?? '');
         await prefs.setString('selected_server_url',
             server['url'] ?? server['baseUrl'] ?? server['server_url'] ?? '');
-        await prefs.setString('selected_server_name',
-            server['display_name'] ?? server['name'] ?? 'Servidor');
+        await prefs.setString(
+          'selected_server_name',
+          server['display_name'] ??
+              server['name'] ??
+              AppLanguage.text('Servidor', 'Server'),
+        );
         if (!mounted) {
           return;
         }
@@ -268,18 +278,27 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Plataforma Leanback para Android TV e Fire TV',
-              style: TextStyle(
+            Text(
+              AppLanguage.text(
+                'Plataforma Leanback para Android TV e Fire TV',
+                'Leanback platform for Android TV and Fire TV',
+              ),
+              style: const TextStyle(
                   color: Colors.purpleAccent,
                   fontSize: 14,
                   fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
-            const Text(
-              'Acesse seu assino com a mesma aparência do simulador web e navegue em telas otimizadas para televisão. Sem controle remoto visível, apenas a interface limpa do conteúdo.',
-              style:
-                  TextStyle(color: Colors.white70, fontSize: 14, height: 1.35),
+            Text(
+              AppLanguage.text(
+                'Acesse sua assinatura e navegue em telas otimizadas para televisao. Sem controles visiveis, apenas uma interface limpa para o conteudo.',
+                'Access your subscription and browse TV-optimized screens. No visible controls, just a clean content interface.',
+              ),
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 14,
+                height: 1.35,
+              ),
             ),
             const SizedBox(height: 18),
             Container(
@@ -292,17 +311,37 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Destaques',
-                      style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  Text(
+                    AppLanguage.text('Destaques', 'Highlights'),
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                    ),
+                  ),
                   const SizedBox(height: 8),
                   _buildFeatureItem(
-                      Icons.shield, 'Interface Leanback escura e elegante'),
+                    Icons.shield,
+                    AppLanguage.text(
+                      'Interface Leanback escura e elegante',
+                      'Dark and elegant Leanback interface',
+                    ),
+                  ),
                   const SizedBox(height: 8),
-                  _buildFeatureItem(Icons.tv,
-                      'Tela de login rica em painel e estilo de app TV'),
+                  _buildFeatureItem(
+                    Icons.tv,
+                    AppLanguage.text(
+                      'Tela de login com estilo de app para TV',
+                      'TV app-style sign-in screen',
+                    ),
+                  ),
                   const SizedBox(height: 8),
-                  _buildFeatureItem(Icons.language,
-                      'Sem overlay de controle remoto no Flutter'),
+                  _buildFeatureItem(
+                    Icons.language,
+                    AppLanguage.text(
+                      'Sem sobreposicao de controles na tela',
+                      'No on-screen control overlay',
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -324,9 +363,9 @@ class _LoginScreenState extends State<LoginScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Login de Acesso',
-            style: TextStyle(
+          Text(
+            AppLanguage.text('Login de Acesso', 'Sign In'),
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 28,
               fontWeight: FontWeight.bold,
@@ -334,9 +373,12 @@ class _LoginScreenState extends State<LoginScreen> {
             textAlign: TextAlign.start,
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Informe seu Codigo, Usuario e Senha para entrar.',
-            style: TextStyle(color: Colors.grey, fontSize: 14),
+          Text(
+            AppLanguage.text(
+              'Informe seu Codigo, Usuario e Senha para entrar.',
+              'Enter your Code, Username and Password to sign in.',
+            ),
+            style: const TextStyle(color: Colors.grey, fontSize: 14),
           ),
           const SizedBox(height: 16),
           if (_errorMessage != null) ...[
@@ -355,21 +397,21 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: 14),
           ],
           _buildNativeInputField(
-            label: 'Codigo',
+            label: AppLanguage.text('Codigo', 'Code'),
             controller: _codeController,
             focusNode: _codeFocusNode,
             nextFocusNode: _userFocusNode,
           ),
           const SizedBox(height: 10),
           _buildNativeInputField(
-            label: 'Usuario',
+            label: AppLanguage.text('Usuario', 'Username'),
             controller: _userController,
             focusNode: _userFocusNode,
             nextFocusNode: _passFocusNode,
           ),
           const SizedBox(height: 10),
           _buildNativeInputField(
-            label: 'Senha',
+            label: AppLanguage.text('Senha', 'Password'),
             controller: _passController,
             focusNode: _passFocusNode,
             nextFocusNode: _loginFocusNode,
@@ -400,7 +442,10 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       )
                     : Text(
-                        'ENTRAR NO ORIO PLAYER',
+                        AppLanguage.text(
+                          'ENTRAR NO ORIO PLAYER',
+                          'SIGN IN TO ORIO PLAYER',
+                        ),
                         style: TextStyle(
                           color:
                               focused ? const Color(0xFF6A00FF) : Colors.white,

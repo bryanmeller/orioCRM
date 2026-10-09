@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'device_info.dart';
 import 'api_service.dart';
 import 'authorization_notice.dart';
+import 'app_language.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
@@ -12,7 +13,7 @@ class InitialScreen extends StatefulWidget {
 }
 
 class _InitialScreenState extends State<InitialScreen> {
-  String _deviceId = 'Carregando...';
+  String _deviceId = AppLanguage.text('Carregando...', 'Loading...');
   bool _showNoLicenseInfo = false;
   bool _isLoadingTrial = false;
   String _trialError = '';
@@ -69,15 +70,19 @@ class _InitialScreenState extends State<InitialScreen> {
         // Automatically go to login or show success message with code
         setState(() {
           _isLoadingTrial = false;
-          _trialError =
-              'Trial ativado com sucesso! Verifique seu código: ${result['licenseCode']}. Os pagamentos online estão temporariamente indisponíveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licença após o período.';
+          _trialError = AppLanguage.text(
+            'Trial ativado com sucesso! Verifique seu codigo: ${result['licenseCode']}. Os pagamentos online estao temporariamente indisponiveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licenca apos o periodo.',
+            'Trial activated successfully! Your code is: ${result['licenseCode']}. Online payments are temporarily unavailable. Sign up on the website or contact a reseller to activate your license after the trial.',
+          );
         });
       }
     } catch (e) {
       setState(() {
         _isLoadingTrial = false;
-        _trialError =
-            'Falha ao solicitar trial: ${e.toString()}\nOs pagamentos online estão temporariamente indisponíveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licença.';
+        _trialError = AppLanguage.text(
+          'Falha ao solicitar trial: ${e.toString()}\nOs pagamentos online estao temporariamente indisponiveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licenca.',
+          'Unable to request a trial: ${e.toString()}\nOnline payments are temporarily unavailable. Sign up on the website or contact a reseller to activate your license.',
+        );
       });
     }
   }
@@ -170,17 +175,23 @@ class _InitialScreenState extends State<InitialScreen> {
                                       ),
                                     ),
                                     const SizedBox(height: 8),
-                                    const Text(
-                                      'Aplicativo Android TV & Fire TV',
-                                      style: TextStyle(
+                                    Text(
+                                      AppLanguage.text(
+                                        'Aplicativo Android TV & Fire TV',
+                                        'Android TV & Fire TV App',
+                                      ),
+                                      style: const TextStyle(
                                         color: Colors.white70,
                                         fontSize: 16,
                                       ),
                                     ),
                                     const SizedBox(height: 12),
-                                    const Text(
-                                      'Use o aplicativo com a mesma aparência do simulador web, sem o painel de controle remoto. Faça login rapidamente e navegue pela TV com foco simplificado.',
-                                      style: TextStyle(
+                                    Text(
+                                      AppLanguage.text(
+                                        'Use o aplicativo com a mesma aparencia do simulador web, sem o painel de controle remoto. Faca login rapidamente e navegue pela TV com foco simplificado.',
+                                        'Use the app with the same look as the web simulator, without the remote-control panel. Sign in quickly and browse on your TV with simple navigation.',
+                                      ),
+                                      style: const TextStyle(
                                         color: Colors.grey,
                                         fontSize: 14,
                                         height: 1.35,
@@ -234,9 +245,12 @@ class _InitialScreenState extends State<InitialScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  const Text(
-                                    'Sem Licença Ativa',
-                                    style: TextStyle(
+                                  Text(
+                                    AppLanguage.text(
+                                      'Sem Licenca Ativa',
+                                      'No Active License',
+                                    ),
+                                    style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 24,
                                         fontWeight: FontWeight.bold),
@@ -263,9 +277,12 @@ class _InitialScreenState extends State<InitialScreen> {
                                     ),
                                     child: Column(
                                       children: [
-                                        const Text(
-                                          'Identificador do dispositivo',
-                                          style: TextStyle(
+                                        Text(
+                                          AppLanguage.text(
+                                            'Identificador do dispositivo',
+                                            'Device Identifier',
+                                          ),
+                                          style: const TextStyle(
                                               color: Colors.white70,
                                               fontSize: 13),
                                         ),
@@ -296,8 +313,12 @@ class _InitialScreenState extends State<InitialScreen> {
                                             padding: const EdgeInsets.symmetric(
                                                 vertical: 16),
                                           ),
-                                          child: const Text('Voltar',
-                                              style: TextStyle(
+                                          child: Text(
+                                              AppLanguage.text(
+                                                'Voltar',
+                                                'Back',
+                                              ),
+                                              style: const TextStyle(
                                                   color: Colors.white)),
                                         ),
                                       ),
@@ -309,9 +330,14 @@ class _InitialScreenState extends State<InitialScreen> {
                                                 ClipboardData(text: _deviceId));
                                             ScaffoldMessenger.of(context)
                                                 .showSnackBar(
-                                              const SnackBar(
-                                                  content: Text(
-                                                      'Device ID Copiado!')),
+                                              SnackBar(
+                                                content: Text(
+                                                  AppLanguage.text(
+                                                    'Device ID copiado!',
+                                                    'Device ID copied!',
+                                                  ),
+                                                ),
+                                              ),
                                             );
                                           },
                                           style: ElevatedButton.styleFrom(
@@ -320,8 +346,12 @@ class _InitialScreenState extends State<InitialScreen> {
                                             padding: const EdgeInsets.symmetric(
                                                 vertical: 16),
                                           ),
-                                          child: const Text(
-                                              'Copiar Identificador'),
+                                          child: Text(
+                                            AppLanguage.text(
+                                              'Copiar Identificador',
+                                              'Copy Identifier',
+                                            ),
+                                          ),
                                         ),
                                       ),
                                     ],
@@ -335,11 +365,20 @@ class _InitialScreenState extends State<InitialScreen> {
                               children: [
                                 Expanded(
                                   child: _buildOptionCard(
-                                    title: 'JÁ TENHO LICENÇA',
-                                    subtitle: 'Acessar o Aplicativo',
-                                    description:
-                                        'Informe seu Código, Usuário e Senha para autenticar.',
-                                    buttonText: 'ENTRAR',
+                                    title: AppLanguage.text(
+                                      'JA TENHO LICENCA',
+                                      'I HAVE A LICENSE',
+                                    ),
+                                    subtitle: AppLanguage.text(
+                                      'Acessar o Aplicativo',
+                                      'Access the App',
+                                    ),
+                                    description: AppLanguage.text(
+                                      'Informe seu Codigo, Usuario e Senha para autenticar.',
+                                      'Enter your Code, Username and Password to sign in.',
+                                    ),
+                                    buttonText:
+                                        AppLanguage.text('ENTRAR', 'SIGN IN'),
                                     color: const Color(0xFF6A00FF),
                                     onTap: _goToLogin,
                                     autofocus: true,
@@ -348,11 +387,22 @@ class _InitialScreenState extends State<InitialScreen> {
                                 const SizedBox(width: 18),
                                 Expanded(
                                   child: _buildOptionCard(
-                                    title: 'NÃO TENHO LICENÇA',
-                                    subtitle: 'Adquira sua Licença',
-                                    description:
-                                        'Acesse o teste grátis ou compre uma licença.',
-                                    buttonText: 'VER DETALHES',
+                                    title: AppLanguage.text(
+                                      'NAO TENHO LICENCA',
+                                      "I DON'T HAVE A LICENSE",
+                                    ),
+                                    subtitle: AppLanguage.text(
+                                      'Adquira sua Licenca',
+                                      'Get Your License',
+                                    ),
+                                    description: AppLanguage.text(
+                                      'Acesse o teste gratis ou compre uma licenca.',
+                                      'Start a free trial or purchase a license.',
+                                    ),
+                                    buttonText: AppLanguage.text(
+                                      'VER DETALHES',
+                                      'VIEW DETAILS',
+                                    ),
                                     color: Colors.teal,
                                     onTap: _handleNoLicense,
                                     autofocus: false,

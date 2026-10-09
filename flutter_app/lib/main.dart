@@ -12,6 +12,7 @@ import 'series_details_screen.dart';
 import 'api_service.dart';
 import 'device_info.dart';
 import 'reminder_service.dart';
+import 'app_language.dart';
 
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -26,6 +27,7 @@ void main() async {
   ]);
 
   final deviceId = await DeviceInfoHelper.getDeviceId();
+  await AppLanguage.load();
   var hasSavedSession = await ApiService.validateSavedSession(
     deviceId: deviceId,
     revalidateWithServer: true,
@@ -131,7 +133,7 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'StreamFlix TV',
+      title: 'ORIO PLAYER',
       navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -187,7 +189,8 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
                 : <IptvContentItem>[];
             return MaterialPageRoute(
               builder: (_) => PlayerScreen(
-                title: args['title'] ?? 'Reprodução',
+                title:
+                    args['title'] ?? AppLanguage.text('Reprodução', 'Playback'),
                 subtitle: args['subtitle'] ?? '',
                 description: (args['description'] ?? '').toString(),
                 imageUrl: (args['imageUrl'] ?? '').toString(),

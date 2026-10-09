@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_language.dart';
+
 class IptvServer {
   final String id;
   final String name;
@@ -40,7 +42,7 @@ class IptvServer {
       id: _stringValue(json['id'], fallback: 'server-$index'),
       name: _stringValue(
         json['display_name'] ?? json['name'],
-        fallback: 'Servidor ${index + 1}',
+        fallback: '${AppLanguage.text('Servidor', 'Server')} ${index + 1}',
       ),
       baseUrl:
           _stringValue(json['url'] ?? json['baseUrl'] ?? json['server_url']),
@@ -180,9 +182,10 @@ class _CentralEpgBatchResult {
 }
 
 class ApiService {
-  static const String allServersUnavailableMessage =
-      'Serviço indisponível no momento. Tente novamente mais tarde ou '
-      'entre em contato com o revendedor ou provedor do serviço.';
+  static String get allServersUnavailableMessage => AppLanguage.text(
+        'Servico indisponivel no momento. Tente novamente mais tarde ou entre em contato com o revendedor ou provedor do servico.',
+        'The service is currently unavailable. Try again later or contact your reseller or service provider.',
+      );
   static DateTime? _lastSessionRefreshAttemptAt;
   static DateTime? _loginRetryAfterUntil;
   static const Duration _requestTimeout = Duration(seconds: 15);
@@ -197,9 +200,10 @@ class ApiService {
   static const String _appLoginLicenseCodeKey = 'app_login_license_code';
   static const String _appLoginUsernameKey = 'app_login_username';
   static const String _appLoginPasswordKey = 'app_login_password';
-  static const String _authorizationDeniedMessage =
-      'Seu acesso não está autorizado. Entre em contato com o revendedor ou '
-      'provedor do serviço.';
+  static String get _authorizationDeniedMessage => AppLanguage.text(
+        'Seu acesso nao esta autorizado. Entre em contato com o revendedor ou provedor do servico.',
+        'Your access is not authorized. Contact your reseller or service provider.',
+      );
   static final Map<String, Future<bool>> _providerStatusChecksInFlight = {};
   static final Map<String, Future<bool>> _deviceSessionChecksInFlight = {};
   static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
@@ -261,7 +265,10 @@ class ApiService {
       return decoded;
     }
 
-    throw Exception(decoded['error'] ?? 'Erro de autenticacao');
+    throw Exception(
+      decoded['error'] ??
+          AppLanguage.text('Erro de autenticacao', 'Authentication error'),
+    );
   }
 
   static Future<Map<String, dynamic>> requestTrial(
@@ -283,7 +290,13 @@ class ApiService {
     }
 
     final errorData = _decodeObject(response.body);
-    throw Exception(errorData['error'] ?? 'Erro ao solicitar teste gratis');
+    throw Exception(
+      errorData['error'] ??
+          AppLanguage.text(
+            'Erro ao solicitar teste gratis',
+            'Unable to request a free trial',
+          ),
+    );
   }
 
   static Future<IptvServer?> getActiveServer() async {
@@ -375,7 +388,12 @@ class ApiService {
       servers = await getSavedServers();
     }
     if (servers.isEmpty) {
-      throw Exception('Servidor nao configurado. Faca login novamente.');
+      throw Exception(
+        AppLanguage.text(
+          'Servidor nao configurado. Faca login novamente.',
+          'Server not configured. Sign in again.',
+        ),
+      );
     }
 
     var triedRefreshAfterError = false;
@@ -392,11 +410,11 @@ class ApiService {
           final secondaryCatalogs = await Future.wait([
             _fetchCatalogOrEmpty(
               () => _fetchMoviesCatalogForServer(server),
-              emptyLabel: 'Todos os Filmes',
+              emptyLabel: AppLanguage.text('Todos os Filmes', 'All Movies'),
             ),
             _fetchCatalogOrEmpty(
               () => _fetchSeriesCatalogForServer(server),
-              emptyLabel: 'Todas as Series',
+              emptyLabel: AppLanguage.text('Todas as Series', 'All Series'),
             ),
           ]);
           return IptvHomeCatalogs(
@@ -570,7 +588,10 @@ class ApiService {
     final categoriesData = await _fetchLiveProxy(server, 'categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
-      const CategoryOption(id: 'todos', label: 'Todos os Canais'),
+      CategoryOption(
+        id: 'todos',
+        label: AppLanguage.text('Todos os Canais', 'All Channels'),
+      ),
       ..._mapCategories(categoriesData),
     ];
 
@@ -579,7 +600,8 @@ class ApiService {
       final index = entry.key;
       final item = entry.value;
       final catId = _stringValue(item['category_id']);
-      final catName = categoryMap[catId] ?? 'Geral';
+      final catName =
+          categoryMap[catId] ?? AppLanguage.text('Geral', 'General');
       final streamId = _stringValue(item['stream_id'] ?? item['id']);
       final ext = _stringValue(
         item['container_extension'],
@@ -612,8 +634,10 @@ class ApiService {
               item['xmltv_id'] ??
               item['tvguide_id'],
         ),
-        title: _stringValue(item['name'] ?? item['stream_name'],
-            fallback: 'Canal sem Nome'),
+        title: _stringValue(
+          item['name'] ?? item['stream_name'],
+          fallback: AppLanguage.text('Canal sem Nome', 'Unnamed Channel'),
+        ),
         subtitle: _formatProgramNow(item),
         category: catName,
         categoryId: catId,
@@ -700,7 +724,10 @@ class ApiService {
     final categoriesData = await _fetchXtream(server, 'get_vod_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
-      const CategoryOption(id: 'todos', label: 'Todos os Filmes'),
+      CategoryOption(
+        id: 'todos',
+        label: AppLanguage.text('Todos os Filmes', 'All Movies'),
+      ),
       ..._mapCategories(categoriesData),
     ];
 
@@ -725,8 +752,10 @@ class ApiService {
 
       return IptvContentItem(
         id: streamId.isNotEmpty ? streamId : 'movie-$index',
-        title: _stringValue(item['name'] ?? item['title'],
-            fallback: 'Filme sem Nome'),
+        title: _stringValue(
+          item['name'] ?? item['title'],
+          fallback: AppLanguage.text('Filme sem Nome', 'Unnamed Movie'),
+        ),
         subtitle: [
           if (year.isNotEmpty) year,
           _categoryName(categoryMap, catId),
@@ -766,7 +795,9 @@ class ApiService {
     ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+      throw Exception(
+        '${AppLanguage.text('Servidor Xtream retornou HTTP', 'Xtream server returned HTTP')} ${response.statusCode}.',
+      );
     }
 
     final decoded = _decodeObject(response.body);
@@ -863,7 +894,10 @@ class ApiService {
     final categoriesData = await _fetchXtream(server, 'get_series_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
-      const CategoryOption(id: 'todos', label: 'Todas as Series'),
+      CategoryOption(
+        id: 'todos',
+        label: AppLanguage.text('Todas as Series', 'All Series'),
+      ),
       ..._mapCategories(categoriesData),
     ];
 
@@ -881,8 +915,10 @@ class ApiService {
 
       return IptvContentItem(
         id: seriesId.isNotEmpty ? seriesId : 'series-$index',
-        title: _stringValue(item['name'] ?? item['title'],
-            fallback: 'Serie sem Nome'),
+        title: _stringValue(
+          item['name'] ?? item['title'],
+          fallback: AppLanguage.text('Serie sem Nome', 'Unnamed Series'),
+        ),
         subtitle: [
           if (year.isNotEmpty) year,
           _categoryName(categoryMap, catId),
@@ -913,7 +949,12 @@ class ApiService {
       }
     }
 
-    throw Exception('Nenhum episodio encontrado para esta serie.');
+    throw Exception(
+      AppLanguage.text(
+        'Nenhum episodio encontrado para esta serie.',
+        'No episodes were found for this series.',
+      ),
+    );
   }
 
   static Future<IptvSeriesDetails> fetchSeriesDetails(
@@ -932,13 +973,20 @@ class ApiService {
     ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+      throw Exception(
+        '${AppLanguage.text('Servidor Xtream retornou HTTP', 'Xtream server returned HTTP')} ${response.statusCode}.',
+      );
     }
 
     final decoded = _decodeObject(response.body);
     final episodes = decoded['episodes'];
     if (episodes is! Map || episodes.isEmpty) {
-      throw Exception('Nenhum episodio encontrado para esta serie.');
+      throw Exception(
+        AppLanguage.text(
+          'Nenhum episodio encontrado para esta serie.',
+          'No episodes were found for this series.',
+        ),
+      );
     }
 
     final seasons = <IptvSeriesSeason>[];
@@ -973,8 +1021,8 @@ class ApiService {
           IptvSeriesSeason(
             id: seasonId.isNotEmpty ? seasonId : '${seasons.length + 1}',
             title: seasonNumber > 0
-                ? 'Temporada $seasonNumber'
-                : 'Temporada ${seasons.length + 1}',
+                ? '${AppLanguage.text('Temporada', 'Season')} $seasonNumber'
+                : '${AppLanguage.text('Temporada', 'Season')} ${seasons.length + 1}',
             episodes: seasonEpisodes,
           ),
         );
@@ -982,7 +1030,12 @@ class ApiService {
     }
 
     if (seasons.isEmpty) {
-      throw Exception('Nenhum episodio encontrado para esta serie.');
+      throw Exception(
+        AppLanguage.text(
+          'Nenhum episodio encontrado para esta serie.',
+          'No episodes were found for this series.',
+        ),
+      );
     }
 
     final info = decoded['info'] is Map
@@ -1015,10 +1068,12 @@ class ApiService {
 
     final episodeTitle = _stringValue(
       json['title'] ?? json['name'],
-      fallback: 'Episodio',
+      fallback: AppLanguage.text('Episodio', 'Episode'),
     );
     final episodeNum = _stringValue(json['episode_num'] ?? json['episode']);
-    final seasonLabel = seasonNumber > 0 ? 'T$seasonNumber' : 'Temporada';
+    final seasonLabel = seasonNumber > 0
+        ? '${AppLanguage.text('T', 'S')}$seasonNumber'
+        : AppLanguage.text('Temporada', 'Season');
     final episodeLabel = episodeNum.isNotEmpty ? 'E$episodeNum' : '';
     final prefix =
         [seasonLabel, episodeLabel].where((part) => part.isNotEmpty).join(' ');
@@ -1056,6 +1111,7 @@ class ApiService {
     await prefs.remove(_appLoginLicenseCodeKey);
     await prefs.remove(_appLoginUsernameKey);
     await prefs.remove(_appLoginPasswordKey);
+    AppLanguage.setPreferredLanguage(null);
   }
 
   static Future<String?> consumeAuthorizationNotice() async {
@@ -1072,17 +1128,20 @@ class ApiService {
     return prefs.getString('auth_token');
   }
 
-  static Future<({DateTime? expiresAt, String preferredLanguage})>
+  static Future<
+          ({DateTime? expiresAt, String preferredLanguage, String accountType})>
       getSavedLicenseDisplayInfo() async {
     final prefs = await SharedPreferences.getInstance();
     final license = _savedLicenseData(prefs);
     final user = _savedUserData(prefs);
     final preferredLanguage =
         _stringValue(user?['preferred_language']).toLowerCase();
+    final accountType = _stringValue(user?['account_type']).toUpperCase();
     final expiresAt = license == null ? null : _sessionExpiryDate(license);
     return (
       expiresAt: expiresAt ?? (user == null ? null : _sessionExpiryDate(user)),
       preferredLanguage: preferredLanguage.startsWith('en') ? 'en' : 'pt',
+      accountType: accountType,
     );
   }
 
@@ -1464,6 +1523,7 @@ class ApiService {
     final prefs = await SharedPreferences.getInstance();
 
     if (decoded['user'] != null) {
+      AppLanguage.updateFromLoginResponse(decoded);
       await prefs.setString('user_data', jsonEncode(decoded['user']));
     }
 
@@ -1731,7 +1791,13 @@ class ApiService {
         ContinueWatchingItem(
           item: IptvContentItem(
             id: _contentItemIdFromPlaybackId(contentId),
-            title: _stringValue(raw['title'], fallback: 'Continuar assistindo'),
+            title: _stringValue(
+              raw['title'],
+              fallback: AppLanguage.text(
+                'Continuar assistindo',
+                'Continue watching',
+              ),
+            ),
             subtitle: _stringValue(raw['subtitle']),
             category: _stringValue(raw['category']),
             categoryId: _stringValue(raw['categoryId']),
@@ -1883,10 +1949,20 @@ class ApiService {
   static Future<IptvServer> _requireActiveServer() async {
     final server = await getActiveServer();
     if (server == null) {
-      throw Exception('Servidor nao configurado. Faca login novamente.');
+      throw Exception(
+        AppLanguage.text(
+          'Servidor nao configurado. Faca login novamente.',
+          'Server not configured. Sign in again.',
+        ),
+      );
     }
     if (!_hasRequiredServerCredentials(server)) {
-      throw Exception('Credenciais Xtream nao encontradas para este servidor.');
+      throw Exception(
+        AppLanguage.text(
+          'Credenciais Xtream nao encontradas para este servidor.',
+          'Xtream credentials were not found for this server.',
+        ),
+      );
     }
     return server;
   }
@@ -1969,7 +2045,13 @@ class ApiService {
     if (response.statusCode < 200 ||
         response.statusCode >= 300 ||
         decoded['success'] != true) {
-      throw Exception(decoded['error'] ?? 'Falha ao carregar canais IPTV.');
+      throw Exception(
+        decoded['error'] ??
+            AppLanguage.text(
+              'Falha ao carregar canais IPTV.',
+              'Unable to load IPTV channels.',
+            ),
+      );
     }
 
     final data = decoded['data'];
@@ -1992,7 +2074,9 @@ class ApiService {
     ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+      throw Exception(
+        '${AppLanguage.text('Servidor Xtream retornou HTTP', 'Xtream server returned HTTP')} ${response.statusCode}.',
+      );
     }
 
     final decoded = jsonDecode(response.body);
@@ -2958,8 +3042,10 @@ class ApiService {
         .map((item) {
           return CategoryOption(
             id: _stringValue(item['category_id']),
-            label:
-                _stringValue(item['category_name'], fallback: 'Sem Categoria'),
+            label: _stringValue(
+              item['category_name'],
+              fallback: AppLanguage.text('Sem Categoria', 'Uncategorized'),
+            ),
           );
         })
         .where((item) => item.id.isNotEmpty)

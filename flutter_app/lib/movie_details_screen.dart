@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'api_service.dart';
+import 'app_language.dart';
 import 'player_return_guard.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
@@ -114,8 +115,14 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
       SnackBar(
         content: Text(
           isFavorite
-              ? 'Filme adicionado aos favoritos.'
-              : 'Filme removido dos favoritos.',
+              ? AppLanguage.text(
+                  'Filme adicionado aos favoritos.',
+                  'Movie added to favorites.',
+                )
+              : AppLanguage.text(
+                  'Filme removido dos favoritos.',
+                  'Movie removed from favorites.',
+                ),
         ),
         duration: const Duration(seconds: 2),
       ),
@@ -125,9 +132,14 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
   Future<void> _playMovie() async {
     if (_movie.streamUrl.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Este conteudo nao possui URL de reproducao.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'Este conteudo nao possui URL de reproducao.',
+              'This content has no playback URL.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -168,19 +180,24 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF101216),
-        title: const Text('Continuar assistindo?'),
+        title: Text(
+          AppLanguage.text('Continuar assistindo?', 'Continue watching?'),
+        ),
         content: Text(
-          'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+          AppLanguage.text(
+            'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+            'You stopped at ${_formatResumeTime(position)}. Continue where you left off?',
+          ),
         ),
         actions: [
           TextButton(
             autofocus: true,
             onPressed: () => Navigator.of(context).pop(position),
-            child: const Text('Continuar'),
+            child: Text(AppLanguage.text('Continuar', 'Continue')),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(Duration.zero),
-            child: const Text('Ver do inicio'),
+            child: Text(AppLanguage.text('Ver do inicio', 'Start over')),
           ),
         ],
       ),
@@ -344,8 +361,11 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
     final synopsisText = synopsis.isNotEmpty
         ? synopsis
         : _detailsLoading
-            ? 'Carregando sinopse...'
-            : 'Sinopse indisponivel.';
+            ? AppLanguage.text('Carregando sinopse...', 'Loading synopsis...')
+            : AppLanguage.text(
+                'Sinopse indisponivel.',
+                'Synopsis unavailable.',
+              );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -389,9 +409,9 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
           ],
         ),
         const SizedBox(height: 28),
-        const Text(
-          'Sinopse',
-          style: TextStyle(
+        Text(
+          AppLanguage.text('Sinopse', 'Synopsis'),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -424,9 +444,12 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Filmes da mesma categoria',
-          style: TextStyle(
+        Text(
+          AppLanguage.text(
+            'Filmes da mesma categoria',
+            'Movies in the same category',
+          ),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -499,14 +522,14 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
           baseColor: const Color(0xFF101216),
           radius: 14,
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.arrow_back, color: Colors.white70, size: 20),
-            SizedBox(width: 10),
+            const Icon(Icons.arrow_back, color: Colors.white70, size: 20),
+            const SizedBox(width: 10),
             Text(
-              'Voltar',
-              style: TextStyle(
+              AppLanguage.text('Voltar', 'Back'),
+              style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
               ),
@@ -530,14 +553,14 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
           radius: 14,
           focusedColor: const Color(0xFFB47CFF),
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.play_arrow, color: Colors.white),
-            SizedBox(width: 8),
+            const Icon(Icons.play_arrow, color: Colors.white),
+            const SizedBox(width: 8),
             Text(
-              'Assistir',
-              style: TextStyle(
+              AppLanguage.text('Assistir', 'Watch'),
+              style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
               ),
@@ -570,7 +593,9 @@ class _MovieDetailsScreenState extends State<MovieDetailsScreen> {
             ),
             const SizedBox(width: 8),
             Text(
-              _isFavorite ? 'Favorito' : 'Favoritar',
+              _isFavorite
+                  ? AppLanguage.text('Favorito', 'Favorite')
+                  : AppLanguage.text('Favoritar', 'Add to Favorites'),
               style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,

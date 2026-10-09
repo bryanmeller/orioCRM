@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 import 'api_service.dart';
+import 'app_language.dart';
 import 'device_info.dart';
 import 'player_return_guard.dart';
 import 'reminder_service.dart';
@@ -13,17 +14,20 @@ import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
 enum HomeSection {
-  home('Inicio', Icons.home),
-  live('TV ao Vivo', Icons.live_tv),
-  movies('Filmes', Icons.movie),
-  series('Series', Icons.tv_rounded),
-  favorites('Favoritos', Icons.favorite),
-  settings('Configuracoes', Icons.settings);
+  home('Inicio', 'Home', Icons.home),
+  live('TV ao Vivo', 'Live TV', Icons.live_tv),
+  movies('Filmes', 'Movies', Icons.movie),
+  series('Series', 'Series', Icons.tv_rounded),
+  favorites('Favoritos', 'Favorites', Icons.favorite),
+  settings('Configuracoes', 'Settings', Icons.settings);
 
-  final String label;
+  final String portugueseLabel;
+  final String englishLabel;
   final IconData icon;
 
-  const HomeSection(this.label, this.icon);
+  const HomeSection(this.portugueseLabel, this.englishLabel, this.icon);
+
+  String get label => AppLanguage.text(portugueseLabel, englishLabel);
 }
 
 class HomeScreen extends StatefulWidget {
@@ -42,8 +46,9 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   HomeSection _activeSection = HomeSection.home;
-  String _serverName = 'Carregando...';
+  String _serverName = AppLanguage.text('Carregando...', 'Loading...');
   String _licenseExpirationLabel = '';
+  bool _licenseExpirationUrgent = false;
   String? _errorMessage;
   bool _loading = true;
   String _selectedCategory = 'todos';
@@ -211,8 +216,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final continueWatching = await ApiService.getContinueWatchingItems();
       final adultContentBlocked = await ApiService.isAdultContentBlocked();
       final activeReminders = await ReminderService.getActiveReminders();
-      final savedServerName =
-          prefs.getString('selected_server_name') ?? 'Servidor Desconhecido';
+      final savedServerName = prefs.getString('selected_server_name') ??
+          AppLanguage.text('Servidor Desconhecido', 'Unknown Server');
 
       if (mounted && loadToken == _homeLoadToken) {
         setState(() => _serverName = savedServerName);
@@ -234,12 +239,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final visibleMovies = adultContentBlocked
           ? _withoutAdultCategories(catalogs.movies)
           : catalogs.movies;
+      final licenseExpirationDisplay =
+          licenseDisplayInfo.accountType == 'PROVIDER'
+              ? (label: '', urgent: false)
+              : _formatLicenseExpiration(
+                  licenseDisplayInfo.expiresAt,
+                  licenseDisplayInfo.preferredLanguage,
+                );
       setState(() {
         _serverName = catalogs.server.name;
-        _licenseExpirationLabel = _formatLicenseExpiration(
-          licenseDisplayInfo.expiresAt,
-          licenseDisplayInfo.preferredLanguage,
-        );
+        _licenseExpirationLabel = licenseExpirationDisplay.label;
+        _licenseExpirationUrgent = licenseExpirationDisplay.urgent;
         _liveCatalog = catalogs.live;
         _movieCatalog = catalogs.movies;
         _seriesCatalog = catalogs.series;
@@ -597,20 +607,64 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _friendlyError(Object error) {
     final message = error.toString().replaceAll('Exception: ', '');
     if (message.contains('TimeoutException')) {
-      return 'Tempo limite ao consultar o servidor. Tente novamente ou troque de servidor.';
+      return AppLanguage.text(
+        'Tempo limite ao consultar o servidor. Tente novamente ou troque de servidor.',
+        'The server request timed out. Try again or switch servers.',
+      );
     }
     return message;
   }
 
-  String _formatLicenseExpiration(DateTime? expiresAt, String language) {
+  ({String label, bool urgent}) _formatLicenseExpiration(
+    DateTime? expiresAt,
+    String language,
+  ) {
     if (expiresAt == null) {
-      return '';
+      return (label: '', urgent: false);
     }
     final localDate = expiresAt.toLocal();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final expirationDate =
+        DateTime(localDate.year, localDate.month, localDate.day);
+    final daysUntilExpiration = expirationDate.difference(today).inDays;
+
+    if (daysUntilExpiration <= 3) {
+      if (daysUntilExpiration < 0) {
+        return (
+          label: language == 'en' ? 'License expired' : 'Licenca expirada',
+          urgent: true,
+        );
+      }
+      if (daysUntilExpiration == 0) {
+        return (
+          label: language == 'en' ? 'Expires today' : 'Vence hoje',
+          urgent: true,
+        );
+      }
+      if (daysUntilExpiration == 1) {
+        return (
+          label: language == 'en'
+              ? 'One day until expiration'
+              : 'Faltando um dia para vencer',
+          urgent: true,
+        );
+      }
+      return (
+        label: language == 'en'
+            ? '$daysUntilExpiration days until expiration'
+            : '$daysUntilExpiration Dias para Vencer',
+        urgent: true,
+      );
+    }
+
     final day = localDate.day.toString().padLeft(2, '0');
     final month = localDate.month.toString().padLeft(2, '0');
     final year = localDate.year.toString();
-    return language == 'en' ? '$month/$day/$year' : '$day/$month/$year';
+    return (
+      label: language == 'en' ? '$month/$day/$year' : '$day/$month/$year',
+      urgent: false,
+    );
   }
 
   Future<void> _refreshLicenseExpirationLabel() async {
@@ -618,16 +672,54 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) {
       return;
     }
-    final label = _formatLicenseExpiration(
-      info.expiresAt,
-      info.preferredLanguage,
-    );
-    if (label != _licenseExpirationLabel) {
-      setState(() => _licenseExpirationLabel = label);
+    final display = info.accountType == 'PROVIDER'
+        ? (label: '', urgent: false)
+        : _formatLicenseExpiration(
+            info.expiresAt,
+            info.preferredLanguage,
+          );
+    if (display.label != _licenseExpirationLabel ||
+        display.urgent != _licenseExpirationUrgent) {
+      setState(() {
+        _licenseExpirationLabel = display.label;
+        _licenseExpirationUrgent = display.urgent;
+      });
     }
   }
 
   Future<void> _handleLogout() async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF101216),
+        title: Text(
+          AppLanguage.text('Sair da conta?', 'Sign out?'),
+        ),
+        content: Text(
+          AppLanguage.text(
+            'Tem certeza que deseja sair da sua conta?',
+            'Are you sure you want to sign out of your account?',
+          ),
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(AppLanguage.text('Cancelar', 'Cancel')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(AppLanguage.text('Sair', 'Sign Out')),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout != true || !mounted) {
+      return;
+    }
+
     await ApiService.logout();
     if (!mounted) {
       return;
@@ -654,9 +746,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (servers.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Nenhum servidor autorizado disponivel no momento.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'Nenhum servidor autorizado disponivel no momento.',
+              'No authorized server is currently available.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -673,9 +770,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (context) {
         return AlertDialog(
           backgroundColor: const Color(0xFF101216),
-          title: Text(listRefreshed
-              ? 'Servidores disponiveis'
-              : 'Servidores salvos (lista pode estar desatualizada)'),
+          title: Text(
+            listRefreshed
+                ? AppLanguage.text(
+                    'Servidores disponiveis',
+                    'Available servers',
+                  )
+                : AppLanguage.text(
+                    'Servidores salvos (lista pode estar desatualizada)',
+                    'Saved servers (the list may be outdated)',
+                  ),
+          ),
           content: SizedBox(
             width: 520,
             height: (servers.length * 58.0).clamp(120.0, 320.0),
@@ -735,13 +840,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           actions: [
             if (servers.length == 1)
-              const Padding(
-                padding: EdgeInsets.only(right: 12),
-                child: Text('Somente este servidor foi autorizado.'),
+              Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: Text(
+                  AppLanguage.text(
+                    'Somente este servidor foi autorizado.',
+                    'Only this server has been authorized.',
+                  ),
+                ),
               ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancelar'),
+              child: Text(AppLanguage.text('Cancelar', 'Cancel')),
             ),
           ],
         );
@@ -784,13 +894,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (context) {
         return AlertDialog(
           backgroundColor: const Color(0xFF101216),
-          title: const Text('Fechar aplicativo?'),
-          content: const Text('Tem certeza que deseja fechar o Orio Player?'),
+          title: Text(AppLanguage.text('Fechar aplicativo?', 'Close the app?')),
+          content: Text(
+            AppLanguage.text(
+              'Tem certeza que deseja fechar o Orio Player?',
+              'Are you sure you want to close Orio Player?',
+            ),
+          ),
           actions: [
             TextButton(
               autofocus: true,
               onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Nao'),
+              child: Text(AppLanguage.text('Nao', 'No')),
             ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(true),
@@ -823,9 +938,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         now.difference(lastPress) > const Duration(seconds: 2)) {
       _lastHomeBackPress = now;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Pressione voltar novamente para fechar.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'Pressione voltar novamente para fechar.',
+              'Press Back again to close.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -851,7 +971,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ..._seriesCatalog.items,
         ].where((item) => _favorites.contains(item.id)).toList();
         return IptvCatalog(
-          categories: const [CategoryOption(id: 'todos', label: 'Favoritos')],
+          categories: [
+            CategoryOption(
+              id: 'todos',
+              label: AppLanguage.text('Favoritos', 'Favorites'),
+            ),
+          ],
           items: items,
         );
       case HomeSection.home:
@@ -1288,9 +1413,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
         setState(() => _activeReminderIds.remove(item.id));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Lembrete removido.'),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            content: Text(
+              AppLanguage.text('Lembrete removido.', 'Reminder removed.'),
+            ),
+            duration: const Duration(seconds: 2),
           ),
         );
         return;
@@ -1298,9 +1425,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       if (!_canScheduleReminder(item)) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Nao e possivel criar lembrete para este evento.'),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            content: Text(
+              AppLanguage.text(
+                'Nao e possivel criar lembrete para este evento.',
+                'A reminder cannot be created for this event.',
+              ),
+            ),
+            duration: const Duration(seconds: 2),
           ),
         );
         return;
@@ -1312,9 +1444,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       setState(() => _activeReminderIds.add(item.id));
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Lembrete ativado para 15 minutos antes do evento.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'Lembrete ativado para 15 minutos antes do evento.',
+              'Reminder set for 15 minutes before the event.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
     } catch (error) {
@@ -1352,19 +1489,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF101216),
-        title: const Text('Continuar assistindo?'),
+        title: Text(
+          AppLanguage.text('Continuar assistindo?', 'Continue watching?'),
+        ),
         content: Text(
-          'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+          AppLanguage.text(
+            'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+            'You stopped at ${_formatResumeTime(position)}. Continue where you left off?',
+          ),
         ),
         actions: [
           TextButton(
             autofocus: true,
             onPressed: () => Navigator.of(context).pop(position),
-            child: const Text('Continuar'),
+            child: Text(AppLanguage.text('Continuar', 'Continue')),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(Duration.zero),
-            child: const Text('Ver do inicio'),
+            child: Text(AppLanguage.text('Ver do inicio', 'Start over')),
           ),
         ],
       ),
@@ -1398,7 +1540,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             void submit() {
               if (!RegExp(r'^\d{4}$').hasMatch(pin)) {
                 setDialogState(() {
-                  errorText = 'Digite uma senha de 4 digitos.';
+                  errorText = AppLanguage.text(
+                    'Digite uma senha de 4 digitos.',
+                    'Enter a 4-digit PIN.',
+                  );
                 });
                 return;
               }
@@ -1518,7 +1663,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancelar'),
+                  child: Text(AppLanguage.text('Cancelar', 'Cancel')),
                 ),
                 TextButton(
                   autofocus: true,
@@ -1535,8 +1680,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<bool> _confirmParentalPin(String action) async {
     final pin = await _showPinDialog(
-      title: 'Controle parental',
-      hint: 'Senha de 4 digitos',
+      title: AppLanguage.text('Controle parental', 'Parental Controls'),
+      hint: AppLanguage.text('Senha de 4 digitos', '4-digit PIN'),
       message: action,
     );
     if (pin == null) {
@@ -1549,9 +1694,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     if (!valid) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Senha do controle parental incorreta.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'Senha do controle parental incorreta.',
+              'Incorrect parental control PIN.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
     }
@@ -1562,8 +1712,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final nextBlocked = !_adultContentBlocked;
     final valid = await _confirmParentalPin(
       nextBlocked
-          ? 'Digite a senha para bloquear categorias XXX.'
-          : 'Digite a senha para liberar categorias XXX.',
+          ? AppLanguage.text(
+              'Digite a senha para bloquear categorias XXX.',
+              'Enter your PIN to block XXX categories.',
+            )
+          : AppLanguage.text(
+              'Digite a senha para liberar categorias XXX.',
+              'Enter your PIN to allow XXX categories.',
+            ),
     );
     if (!valid || !mounted) {
       return;
@@ -1583,8 +1739,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       SnackBar(
         content: Text(
           nextBlocked
-              ? 'Categorias XXX bloqueadas.'
-              : 'Categorias XXX liberadas.',
+              ? AppLanguage.text(
+                  'Categorias XXX bloqueadas.',
+                  'XXX categories are blocked.',
+                )
+              : AppLanguage.text(
+                  'Categorias XXX liberadas.',
+                  'XXX categories are allowed.',
+                ),
         ),
         duration: const Duration(seconds: 2),
       ),
@@ -1593,23 +1755,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _changeParentalPin() async {
     final valid = await _confirmParentalPin(
-      'Digite a senha atual. A senha inicial e 1234.',
+      AppLanguage.text(
+        'Digite a senha atual. A senha inicial e 1234.',
+        'Enter your current PIN. The default PIN is 1234.',
+      ),
     );
     if (!valid || !mounted) {
       return;
     }
 
     final newPin = await _showPinDialog(
-      title: 'Nova senha',
-      hint: 'Nova senha de 4 digitos',
+      title: AppLanguage.text('Nova senha', 'New PIN'),
+      hint: AppLanguage.text('Nova senha de 4 digitos', 'New 4-digit PIN'),
     );
     if (newPin == null || !mounted) {
       return;
     }
 
     final confirmationPin = await _showPinDialog(
-      title: 'Confirmar senha',
-      hint: 'Repita a senha',
+      title: AppLanguage.text('Confirmar senha', 'Confirm PIN'),
+      hint: AppLanguage.text('Repita a senha', 'Enter the PIN again'),
     );
     if (confirmationPin == null || !mounted) {
       return;
@@ -1617,9 +1782,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (newPin != confirmationPin) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('As senhas digitadas nao conferem.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'As senhas digitadas nao conferem.',
+              'The PINs do not match.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -1630,9 +1800,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Senha do controle parental alterada.'),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: Text(
+          AppLanguage.text(
+            'Senha do controle parental alterada.',
+            'Parental control PIN changed.',
+          ),
+        ),
+        duration: const Duration(seconds: 2),
       ),
     );
   }
@@ -1670,7 +1845,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
 
       if (item.streamUrl.isEmpty) {
-        throw Exception('Este conteudo nao possui URL de reproducao.');
+        throw Exception(
+          AppLanguage.text(
+            'Este conteudo nao possui URL de reproducao.',
+            'This content has no playback URL.',
+          ),
+        );
       }
 
       if (!mounted) {
@@ -2002,8 +2182,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       Text(
                         'License App: $_licenseExpirationLabel',
                         maxLines: 1,
-                        style: const TextStyle(
-                          color: Color(0xFFB8A0FF),
+                        style: TextStyle(
+                          color: _licenseExpirationUrgent
+                              ? Colors.redAccent
+                              : const Color(0xFFB8A0FF),
                           fontSize: 10,
                           fontWeight: FontWeight.w600,
                         ),
@@ -2017,7 +2199,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     ],
                     Expanded(
                       child: Text(
-                        'Servidor: $_serverName',
+                        '${AppLanguage.text('Servidor', 'Server')}: $_serverName',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -2061,7 +2243,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               const SizedBox(width: 6),
               _buildFocusButton(
                 icon: Icons.exit_to_app,
-                label: 'Sair',
+                label: AppLanguage.text('Sair', 'Exit'),
                 onPressed: _confirmExitApp,
                 compact: true,
               ),
@@ -2118,11 +2300,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _buildFavoritesSection(favoriteItems),
           ],
           const SizedBox(height: 22),
-          _buildSectionHeader('TV ao Vivo', HomeSection.live),
+          _buildSectionHeader(
+            AppLanguage.text('TV ao Vivo', 'Live TV'),
+            HomeSection.live,
+          ),
           const SizedBox(height: 12),
           _buildHorizontalRail(livePreview, compact: true),
           const SizedBox(height: 24),
-          _buildSectionHeader('Filmes em Destaque', HomeSection.movies),
+          _buildSectionHeader(
+            AppLanguage.text('Filmes em Destaque', 'Featured Movies'),
+            HomeSection.movies,
+          ),
           const SizedBox(height: 12),
           _buildHorizontalRail(moviesPreview),
           if (_errorMessage != null) ...[
@@ -2162,9 +2350,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               baseColor: const Color(0xFF101216),
               radius: 12,
             ),
-            child: const Text(
-              'Ver tudo',
-              style: TextStyle(
+            child: Text(
+              AppLanguage.text('Ver tudo', 'View all'),
+              style: const TextStyle(
                 color: Color(0xFFD8C6FF),
                 fontWeight: FontWeight.bold,
               ),
@@ -2181,9 +2369,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Continuar Assistindo',
-          style: TextStyle(
+        Text(
+          AppLanguage.text('Continuar Assistindo', 'Continue Watching'),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -2330,9 +2518,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'Favoritos',
-              style: TextStyle(
+            Text(
+              AppLanguage.text('Favoritos', 'Favorites'),
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
@@ -2354,9 +2542,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   baseColor: const Color(0xFF101216),
                   radius: 12,
                 ),
-                child: const Text(
-                  'Ver tudo',
-                  style: TextStyle(
+                child: Text(
+                  AppLanguage.text('Ver tudo', 'View all'),
+                  style: const TextStyle(
                     color: Color(0xFFD8C6FF),
                     fontWeight: FontWeight.bold,
                   ),
@@ -2490,9 +2678,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Jogos do Dia',
-          style: TextStyle(
+        Text(
+          AppLanguage.text('Jogos do Dia', "Today's Games"),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -2717,14 +2905,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildSearchBar({bool compact = false}) {
     final sectionName = _activeSection == HomeSection.live
-        ? 'canais'
+        ? AppLanguage.text('canais', 'channels')
         : _activeSection == HomeSection.movies
-            ? 'filmes'
+            ? AppLanguage.text('filmes', 'movies')
             : _activeSection == HomeSection.series
-                ? 'series'
+                ? AppLanguage.text('series', 'series')
                 : _activeSection == HomeSection.favorites
-                    ? 'favoritos'
-                    : 'conteudos';
+                    ? AppLanguage.text('favoritos', 'favorites')
+                    : AppLanguage.text('conteudos', 'content');
 
     return Focus(
       canRequestFocus: false,
@@ -2736,7 +2924,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           focusNode: _searchFocusNode,
           controller: _searchController,
           height: compact ? 36 : 52,
-          hint: 'Pesquisar $sectionName',
+          hint: '${AppLanguage.text('Pesquisar', 'Search')} $sectionName',
           backgroundColor: const Color(0xFF101216),
           textColor: Colors.white,
           fontSize: compact ? 13 : 18,
@@ -2768,8 +2956,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (items.isEmpty) {
       final message = _searchQuery.trim().isEmpty
-          ? 'Nenhum conteudo encontrado nesta categoria.'
-          : 'Nenhum resultado para "${_searchQuery.trim()}".';
+          ? AppLanguage.text(
+              'Nenhum conteudo encontrado nesta categoria.',
+              'No content was found in this category.',
+            )
+          : AppLanguage.text(
+              'Nenhum resultado para "${_searchQuery.trim()}".',
+              'No results for "${_searchQuery.trim()}".',
+            );
       return Center(
         child: Text(
           message,
@@ -2813,15 +3007,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       decoration: _panelDecoration(radius: 18),
       child: Column(
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 12, 16, 10),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
             child: Row(
               children: [
-                SizedBox(width: 64, child: Text('CANAL', style: _HeaderText())),
-                Expanded(flex: 3, child: Text('NOME', style: _HeaderText())),
-                Expanded(flex: 3, child: Text('AGORA', style: _HeaderText())),
-                Expanded(flex: 3, child: Text('PROXIMO', style: _HeaderText())),
-                SizedBox(width: 40, child: Text('FAV', style: _HeaderText())),
+                SizedBox(
+                  width: 64,
+                  child: Text(
+                    AppLanguage.text('CANAL', 'CHANNEL'),
+                    style: const _HeaderText(),
+                  ),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(
+                    AppLanguage.text('NOME', 'NAME'),
+                    style: const _HeaderText(),
+                  ),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(
+                    AppLanguage.text('AGORA', 'NOW'),
+                    style: const _HeaderText(),
+                  ),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(
+                    AppLanguage.text('PROXIMO', 'NEXT'),
+                    style: const _HeaderText(),
+                  ),
+                ),
+                const SizedBox(
+                  width: 40,
+                  child: Text('FAV', style: _HeaderText()),
+                ),
               ],
             ),
           ),
@@ -2940,7 +3161,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _buildHorizontalRail(List<IptvContentItem> items,
       {bool compact = false}) {
     if (items.isEmpty) {
-      return _buildInlineError('Nenhum conteudo carregado.');
+      return _buildInlineError(
+        AppLanguage.text(
+          'Nenhum conteudo carregado.',
+          'No content has been loaded.',
+        ),
+      );
     }
 
     return SizedBox(
@@ -3159,9 +3385,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Configuracoes',
-            style: TextStyle(
+          Text(
+            AppLanguage.text('Configuracoes', 'Settings'),
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 20,
               fontWeight: FontWeight.bold,
@@ -3169,15 +3395,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 16),
           if (_errorMessage != null) ...[
-            _buildInlineError('Erro atual: $_errorMessage'),
+            _buildInlineError(
+              '${AppLanguage.text('Erro atual', 'Current error')}: $_errorMessage',
+            ),
             const SizedBox(height: 12),
           ],
-          _buildInlineError('Servidor ativo: $_serverName'),
+          _buildInlineError(
+            '${AppLanguage.text('Servidor ativo', 'Active server')}: $_serverName',
+          ),
           const SizedBox(height: 14),
           _buildInlineError(
             _adultContentBlocked
-                ? 'Controle parental: categorias XXX bloqueadas.'
-                : 'Controle parental: categorias XXX liberadas.',
+                ? AppLanguage.text(
+                    'Controle parental: categorias XXX bloqueadas.',
+                    'Parental controls: XXX categories are blocked.',
+                  )
+                : AppLanguage.text(
+                    'Controle parental: categorias XXX liberadas.',
+                    'Parental controls: XXX categories are allowed.',
+                  ),
           ),
           const SizedBox(height: 14),
           _buildFocusButton(
@@ -3185,8 +3421,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ? Icons.lock_rounded
                 : Icons.lock_open_rounded,
             label: _adultContentBlocked
-                ? 'Liberar Conteudo Adulto'
-                : 'Bloquear Conteudo Adulto',
+                ? AppLanguage.text(
+                    'Liberar Conteudo Adulto',
+                    'Allow Adult Content',
+                  )
+                : AppLanguage.text(
+                    'Bloquear Conteudo Adulto',
+                    'Block Adult Content',
+                  ),
             onPressed: _toggleAdultContentBlock,
             focusNode: _parentalToggleFocusNode,
             moveLeftToSidebar: true,
@@ -3194,21 +3436,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.pin_rounded,
-            label: 'Alterar Senha Parental',
+            label: AppLanguage.text(
+              'Alterar Senha Parental',
+              'Change Parental PIN',
+            ),
             onPressed: _changeParentalPin,
             focusNode: _changeParentalPinFocusNode,
           ),
           const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.dns_rounded,
-            label: 'Trocar Servidor',
+            label: AppLanguage.text('Trocar Servidor', 'Switch Server'),
             onPressed: _handleChangeServer,
             focusNode: _changeServerFocusNode,
           ),
           const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.exit_to_app,
-            label: 'Sair da Conta',
+            label: AppLanguage.text('Sair da Conta', 'Sign Out'),
             onPressed: _handleLogout,
             focusNode: _logoutAccountFocusNode,
           ),
@@ -3218,16 +3463,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildLoading() {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(color: Color(0xFF6A00FF)),
-          SizedBox(height: 16),
+          const CircularProgressIndicator(color: Color(0xFF6A00FF)),
+          const SizedBox(height: 16),
           Text(
-            'Carregando catalogo IPTV...',
-            style:
-                TextStyle(color: Colors.white70, fontWeight: FontWeight.bold),
+            AppLanguage.text(
+              'Carregando catalogo IPTV...',
+              'Loading IPTV catalog...',
+            ),
+            style: const TextStyle(
+              color: Colors.white70,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ],
       ),
@@ -3245,14 +3495,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 color: Colors.redAccent, size: 42),
             const SizedBox(height: 12),
             Text(
-              _errorMessage ?? 'Falha ao carregar conteudo IPTV.',
+              _errorMessage ??
+                  AppLanguage.text(
+                    'Falha ao carregar conteudo IPTV.',
+                    'Unable to load IPTV content.',
+                  ),
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70),
             ),
             const SizedBox(height: 16),
             _buildFocusButton(
               icon: Icons.refresh,
-              label: 'Tentar Novamente',
+              label: AppLanguage.text('Tentar Novamente', 'Try Again'),
               onPressed: () => _loadHome(refreshServersFirst: true),
               moveLeftToSidebar: true,
             ),
