@@ -1,5 +1,5 @@
 name: streamflix_tv
-description: StreamFlix TV App
+description: Orio Player for Android TV and Fire TV
 publish_to: none
 version: 1.0.0+1
 environment:
