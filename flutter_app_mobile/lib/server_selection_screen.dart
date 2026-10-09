@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_language.dart';
 import 'tv_safe_area.dart';
 
 class ServerSelectionScreen extends StatelessWidget {
@@ -15,13 +16,21 @@ class ServerSelectionScreen extends StatelessWidget {
     await prefs.setString('selected_server_id', server['id'] ?? '');
     await prefs.setString('selected_server_url',
         server['url'] ?? server['baseUrl'] ?? server['server_url'] ?? '');
-    await prefs.setString('selected_server_name',
-        server['display_name'] ?? server['name'] ?? 'Servidor');
+    await prefs.setString(
+      'selected_server_name',
+      server['display_name'] ??
+          server['name'] ??
+          AppLanguage.text('Servidor', 'Server'),
+    );
 
     if (!context.mounted) {
       return;
     }
-    Navigator.of(context).pushReplacementNamed('/home');
+    Navigator.of(context).pushNamedAndRemoveUntil(
+      '/home',
+      (route) => false,
+      arguments: const {'skipInitialSessionRevalidation': true},
+    );
   }
 
   @override
@@ -48,18 +57,27 @@ class ServerSelectionScreen extends StatelessWidget {
                 child: FocusTraversalGroup(
                   child: Column(
                     children: [
-                      const Text(
-                        'Selecionar Servidor',
-                        style: TextStyle(
+                      Text(
+                        AppLanguage.text(
+                          'Selecionar Servidor',
+                          'Select Server',
+                        ),
+                        style: const TextStyle(
                           color: Colors.white,
                           fontSize: 24,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
                       const SizedBox(height: 8),
-                      const Text(
-                        'Sua licenca possui acesso a multiplos servidores.',
-                        style: TextStyle(color: Colors.grey, fontSize: 14),
+                      Text(
+                        AppLanguage.text(
+                          'Sua licenca possui acesso a multiplos servidores.',
+                          'Your license has access to multiple servers.',
+                        ),
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 14,
+                        ),
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 18),
@@ -92,7 +110,7 @@ class ServerSelectionScreen extends StatelessWidget {
                               child: Text(
                                 server['display_name'] ??
                                     server['name'] ??
-                                    'Servidor ${index + 1}',
+                                    '${AppLanguage.text('Servidor', 'Server')} ${index + 1}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(

@@ -14,7 +14,7 @@ Future<void> showPendingAuthorizationNotice(BuildContext context) async {
     barrierDismissible: false,
     builder: (dialogContext) => AlertDialog(
       title: Text(
-        AppLanguage.text('Acesso não autorizado', 'Unauthorized access'),
+        AppLanguage.text('Acesso nao autorizado', 'Unauthorized access'),
       ),
       content: Text(message),
       actions: [

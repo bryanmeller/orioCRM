@@ -1,7 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'app_language.dart';
 
 class IptvServer {
   final String id;
@@ -37,7 +42,7 @@ class IptvServer {
       id: _stringValue(json['id'], fallback: 'server-$index'),
       name: _stringValue(
         json['display_name'] ?? json['name'],
-        fallback: 'Servidor ${index + 1}',
+        fallback: '${AppLanguage.text('Servidor', 'Server')} ${index + 1}',
       ),
       baseUrl:
           _stringValue(json['url'] ?? json['baseUrl'] ?? json['server_url']),
@@ -169,16 +174,51 @@ class _LiveProgram {
   });
 }
 
+class _CentralEpgBatchResult {
+  final bool success;
+  final Map<String, Map<String, dynamic>> data;
+
+  const _CentralEpgBatchResult({required this.success, required this.data});
+}
+
 class ApiService {
+  static String get allServersUnavailableMessage => AppLanguage.text(
+        'Servico indisponivel no momento. Tente novamente mais tarde ou entre em contato com o revendedor ou provedor do servico.',
+        'The service is currently unavailable. Try again later or contact your reseller or service provider.',
+      );
+  static DateTime? _lastSessionRefreshAttemptAt;
+  static DateTime? _loginRetryAfterUntil;
   static const Duration _requestTimeout = Duration(seconds: 15);
   static const Duration _loginTimeout = Duration(seconds: 30);
   static const Duration _sessionValidationTimeout = Duration(seconds: 12);
+  static const Duration _providerStatusTimeout = Duration(seconds: 7);
+  static const Duration _providerStatusDefaultInterval = Duration(days: 1);
+  static const String _providerStatusNextCheckKey =
+      'provider_license_status_next_check_at';
+  static const String _providerStatusCodeKey = 'provider_license_status_code';
+  static const String _authorizationNoticeKey = 'authorization_notice';
+  static const String _appLoginLicenseCodeKey = 'app_login_license_code';
+  static const String _appLoginUsernameKey = 'app_login_username';
+  static const String _appLoginPasswordKey = 'app_login_password';
+  static String get _authorizationDeniedMessage => AppLanguage.text(
+        'Seu acesso nao esta autorizado. Entre em contato com o revendedor ou provedor do servico.',
+        'Your access is not authorized. Contact your reseller or service provider.',
+      );
+  static final Map<String, Future<bool>> _providerStatusChecksInFlight = {};
+  static final Map<String, Future<bool>> _deviceSessionChecksInFlight = {};
   static const Duration _liveNowNextCacheMaxAge = Duration(hours: 26);
   static const Duration _liveNowNextRefreshInterval = Duration(hours: 20);
+  static const Duration _missingLiveEpgRefreshInterval = Duration(minutes: 30);
   static const String _parentalPinKey = 'parental_control_pin';
   static const String _adultContentBlockedKey = 'adult_content_blocked';
   static const String _defaultParentalPin = '1234';
   static const String _liveNowNextCachePrefix = 'live_now_next_epg_cache_v1';
+  static const bool epgDiagnosticsEnabled = kDebugMode ||
+      bool.fromEnvironment('EPG_DIAGNOSTICS', defaultValue: false);
+  static final http.Client _epgHttpClient = http.Client();
+  static final Map<String, Future<_CentralEpgBatchResult>> _centralEpgInFlight =
+      {};
+  static final Map<String, Future<void>> _centralEpgCacheWrites = {};
 
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -198,7 +238,7 @@ class ApiService {
   }) async {
     final response = await http
         .post(
-          Uri.parse('$appBaseUrl/v1/auth/app/login'),
+          Uri.parse('$baseUrl/v1/auth/app/login'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'licenseCode': licenseCode,
@@ -211,13 +251,24 @@ class ApiService {
         .timeout(_loginTimeout);
 
     final decoded = _decodeObject(response.body);
-    if (response.statusCode == 200) {
+    if (response.statusCode == 200 &&
+        decoded['success'] == true &&
+        decoded['servers'] is List &&
+        (decoded['servers'] as List).isNotEmpty) {
       await _saveSessionPayload(decoded);
+      await _saveAppLoginCredentials(
+        licenseCode: licenseCode,
+        username: username,
+        password: password,
+      );
 
       return decoded;
     }
 
-    throw Exception(decoded['error'] ?? 'Erro de autenticacao');
+    throw Exception(
+      decoded['error'] ??
+          AppLanguage.text('Erro de autenticacao', 'Authentication error'),
+    );
   }
 
   static Future<Map<String, dynamic>> requestTrial(
@@ -239,7 +290,13 @@ class ApiService {
     }
 
     final errorData = _decodeObject(response.body);
-    throw Exception(errorData['error'] ?? 'Erro ao solicitar teste gratis');
+    throw Exception(
+      errorData['error'] ??
+          AppLanguage.text(
+            'Erro ao solicitar teste gratis',
+            'Unable to request a free trial',
+          ),
+    );
   }
 
   static Future<IptvServer?> getActiveServer() async {
@@ -331,18 +388,19 @@ class ApiService {
       servers = await getSavedServers();
     }
     if (servers.isEmpty) {
-      throw Exception('Servidor nao configurado. Faca login novamente.');
+      throw Exception(
+        AppLanguage.text(
+          'Servidor nao configurado. Faca login novamente.',
+          'Server not configured. Sign in again.',
+        ),
+      );
     }
 
-    var triedRefreshAfterError = refreshServersFirst;
-    Object? lastError;
-
+    var triedRefreshAfterError = false;
     while (true) {
       final orderedServers = await _orderedServersForFailover(servers);
       for (final server in orderedServers) {
         if (!_hasRequiredServerCredentials(server)) {
-          lastError = Exception(
-              'Credenciais Xtream nao encontradas para este servidor.');
           continue;
         }
 
@@ -352,11 +410,11 @@ class ApiService {
           final secondaryCatalogs = await Future.wait([
             _fetchCatalogOrEmpty(
               () => _fetchMoviesCatalogForServer(server),
-              emptyLabel: 'Todos os Filmes',
+              emptyLabel: AppLanguage.text('Todos os Filmes', 'All Movies'),
             ),
             _fetchCatalogOrEmpty(
               () => _fetchSeriesCatalogForServer(server),
-              emptyLabel: 'Todas as Series',
+              emptyLabel: AppLanguage.text('Todas as Series', 'All Series'),
             ),
           ]);
           return IptvHomeCatalogs(
@@ -365,20 +423,18 @@ class ApiService {
             movies: secondaryCatalogs[0],
             series: secondaryCatalogs[1],
           );
-        } catch (error) {
-          lastError = error;
-        }
+        } catch (_) {}
       }
 
       if (triedRefreshAfterError) {
-        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+        throw Exception(allServersUnavailableMessage);
       }
 
       triedRefreshAfterError = true;
       await _tryRefreshSavedSession(deviceId: deviceId);
       final refreshedServers = await getSavedServers();
       if (refreshedServers.isEmpty) {
-        throw lastError ?? Exception('Falha ao carregar conteudo IPTV.');
+        throw Exception(allServersUnavailableMessage);
       }
       servers = refreshedServers;
     }
@@ -401,26 +457,98 @@ class ApiService {
   static Future<bool> refreshSavedSession({
     String deviceId = '',
     bool logoutOnRevoked = true,
+    Duration? minInterval,
+    http.Client? client,
   }) async {
     final normalizedDeviceId = _stringValue(deviceId);
     if (normalizedDeviceId.isEmpty) {
       return false;
     }
 
-    final response = await http
-        .post(
-          Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Device-Id': normalizedDeviceId,
-          },
-          body: jsonEncode({'deviceId': normalizedDeviceId}),
-        )
-        .timeout(_sessionValidationTimeout);
+    final now = DateTime.now();
+    if (minInterval != null &&
+        _lastSessionRefreshAttemptAt != null &&
+        now.difference(_lastSessionRefreshAttemptAt!) < minInterval) {
+      return false;
+    }
+    _lastSessionRefreshAttemptAt = now;
+
+    final prefs = await SharedPreferences.getInstance();
+    final savedLogin = _savedAppLoginCredentials(prefs);
+    final user = _savedUserData(prefs);
+    final providerCode = _stringValue(
+      user?['provider_code'] ??
+          user?['providerCode'] ??
+          _providerCodeFromJwt(prefs.getString('auth_token') ?? ''),
+    );
+    final isProvider = providerCode.isNotEmpty;
+    var loginLicenseCode = savedLogin?.licenseCode ?? '';
+    var loginUsername = savedLogin?.username ?? '';
+    var loginPassword = savedLogin?.password ?? '';
+    if (loginLicenseCode.isEmpty && isProvider) {
+      final server = await getActiveServer();
+      if (server != null && _hasRequiredServerCredentials(server)) {
+        loginLicenseCode = providerCode;
+        loginUsername = server.username;
+        loginPassword = server.password;
+      }
+    }
+    final usesAppLogin = loginLicenseCode.isNotEmpty &&
+        loginUsername.isNotEmpty &&
+        loginPassword.isNotEmpty;
+    if (usesAppLogin &&
+        _loginRetryAfterUntil != null &&
+        now.isBefore(_loginRetryAfterUntil!)) {
+      return false;
+    }
+
+    final uri = Uri.parse(usesAppLogin
+        ? '$baseUrl/v1/auth/app/login'
+        : '$appBaseUrl/v1/auth/app/device-login');
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      if (!usesAppLogin) 'X-Device-Id': normalizedDeviceId,
+    };
+    final body = jsonEncode(usesAppLogin
+        ? {
+            'licenseCode': loginLicenseCode,
+            'username': loginUsername,
+            'password': loginPassword,
+            'deviceId': normalizedDeviceId,
+          }
+        : {'deviceId': normalizedDeviceId});
+
+    final response = await (client == null
+            ? http.post(uri, headers: headers, body: body)
+            : client.post(uri, headers: headers, body: body))
+        .timeout(usesAppLogin ? _loginTimeout : _sessionValidationTimeout);
 
     final decoded = _decodeObject(response.body);
-    if (response.statusCode == 200 && decoded['success'] == true) {
+    if (usesAppLogin && response.statusCode == 429) {
+      final retryAfter = response.headers['retry-after'];
+      final delaySeconds = int.tryParse(retryAfter ?? '');
+      if (delaySeconds != null) {
+        _loginRetryAfterUntil =
+            DateTime.now().add(Duration(seconds: delaySeconds.clamp(1, 3600)));
+      } else {
+        try {
+          _loginRetryAfterUntil = HttpDate.parse(retryAfter ?? '');
+        } catch (_) {
+          _loginRetryAfterUntil = null;
+        }
+      }
+      return false;
+    }
+    if (response.statusCode == 200 &&
+        decoded['success'] == true &&
+        (!usesAppLogin ||
+            (decoded['servers'] is List &&
+                (decoded['servers'] as List).isNotEmpty))) {
       await _saveSessionPayload(decoded);
+      if (usesAppLogin) {
+        _loginRetryAfterUntil = null;
+      }
       return true;
     }
 
@@ -429,6 +557,11 @@ class ApiService {
     if (logoutOnRevoked &&
         _isSessionRevokedResponse(response.statusCode, code, error)) {
       await logout();
+      final refreshedPrefs = await SharedPreferences.getInstance();
+      await refreshedPrefs.setString(
+        _authorizationNoticeKey,
+        _authorizationDeniedMessage,
+      );
     }
     return false;
   }
@@ -455,7 +588,10 @@ class ApiService {
     final categoriesData = await _fetchLiveProxy(server, 'categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
-      const CategoryOption(id: 'todos', label: 'Todos os Canais'),
+      CategoryOption(
+        id: 'todos',
+        label: AppLanguage.text('Todos os Canais', 'All Channels'),
+      ),
       ..._mapCategories(categoriesData),
     ];
 
@@ -464,7 +600,8 @@ class ApiService {
       final index = entry.key;
       final item = entry.value;
       final catId = _stringValue(item['category_id']);
-      final catName = categoryMap[catId] ?? 'Geral';
+      final catName =
+          categoryMap[catId] ?? AppLanguage.text('Geral', 'General');
       final streamId = _stringValue(item['stream_id'] ?? item['id']);
       final ext = _stringValue(
         item['container_extension'],
@@ -497,8 +634,10 @@ class ApiService {
               item['xmltv_id'] ??
               item['tvguide_id'],
         ),
-        title: _stringValue(item['name'] ?? item['stream_name'],
-            fallback: 'Canal sem Nome'),
+        title: _stringValue(
+          item['name'] ?? item['stream_name'],
+          fallback: AppLanguage.text('Canal sem Nome', 'Unnamed Channel'),
+        ),
         subtitle: _formatProgramNow(item),
         category: catName,
         categoryId: catId,
@@ -538,24 +677,40 @@ class ApiService {
     );
   }
 
-  static Future<List<IptvContentItem>> refreshLiveEpgCache(
+  static Future<({List<IptvContentItem> items, bool success})>
+      refreshLiveEpgCache(
     List<IptvContentItem> items, {
     bool force = false,
   }) async {
     if (items.isEmpty) {
-      return const [];
+      return (items: <IptvContentItem>[], success: true);
     }
 
     final server = await _requireActiveServer();
     final cachedItems = await _applyCachedCentralLiveEpg(server, items);
-    final hasPendingItems = cachedItems.any((item) => !item.liveEpgChecked);
+    final pendingItems =
+        cachedItems.where((item) => !item.liveEpgChecked).toList();
     if (!force &&
-        !hasPendingItems &&
+        pendingItems.isEmpty &&
         !await _shouldRefreshCentralLiveEpg(server)) {
-      return cachedItems;
+      return (items: cachedItems, success: true);
     }
 
-    return _attachCentralLiveEpg(server, cachedItems);
+    final refreshItems =
+        force || pendingItems.isEmpty ? cachedItems : pendingItems;
+    final refreshed = await _attachCentralLiveEpg(server, refreshItems);
+    final refreshedById = {
+      for (final item in refreshed.items)
+        item.id: refreshed.success && !item.liveEpgChecked
+            ? _itemWithoutLiveEpg(item)
+            : item,
+    };
+    return (
+      items: [
+        for (final item in cachedItems) refreshedById[item.id] ?? item,
+      ],
+      success: refreshed.success,
+    );
   }
 
   static Future<IptvCatalog> fetchMoviesCatalog() async {
@@ -569,7 +724,10 @@ class ApiService {
     final categoriesData = await _fetchXtream(server, 'get_vod_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
-      const CategoryOption(id: 'todos', label: 'Todos os Filmes'),
+      CategoryOption(
+        id: 'todos',
+        label: AppLanguage.text('Todos os Filmes', 'All Movies'),
+      ),
       ..._mapCategories(categoriesData),
     ];
 
@@ -594,8 +752,10 @@ class ApiService {
 
       return IptvContentItem(
         id: streamId.isNotEmpty ? streamId : 'movie-$index',
-        title: _stringValue(item['name'] ?? item['title'],
-            fallback: 'Filme sem Nome'),
+        title: _stringValue(
+          item['name'] ?? item['title'],
+          fallback: AppLanguage.text('Filme sem Nome', 'Unnamed Movie'),
+        ),
         subtitle: [
           if (year.isNotEmpty) year,
           _categoryName(categoryMap, catId),
@@ -635,7 +795,9 @@ class ApiService {
     ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+      throw Exception(
+        '${AppLanguage.text('Servidor Xtream retornou HTTP', 'Xtream server returned HTTP')} ${response.statusCode}.',
+      );
     }
 
     final decoded = _decodeObject(response.body);
@@ -732,7 +894,10 @@ class ApiService {
     final categoriesData = await _fetchXtream(server, 'get_series_categories');
     final categoryMap = _categoryNameMap(categoriesData);
     final categories = [
-      const CategoryOption(id: 'todos', label: 'Todas as Series'),
+      CategoryOption(
+        id: 'todos',
+        label: AppLanguage.text('Todas as Series', 'All Series'),
+      ),
       ..._mapCategories(categoriesData),
     ];
 
@@ -750,8 +915,10 @@ class ApiService {
 
       return IptvContentItem(
         id: seriesId.isNotEmpty ? seriesId : 'series-$index',
-        title: _stringValue(item['name'] ?? item['title'],
-            fallback: 'Serie sem Nome'),
+        title: _stringValue(
+          item['name'] ?? item['title'],
+          fallback: AppLanguage.text('Serie sem Nome', 'Unnamed Series'),
+        ),
         subtitle: [
           if (year.isNotEmpty) year,
           _categoryName(categoryMap, catId),
@@ -782,7 +949,12 @@ class ApiService {
       }
     }
 
-    throw Exception('Nenhum episodio encontrado para esta serie.');
+    throw Exception(
+      AppLanguage.text(
+        'Nenhum episodio encontrado para esta serie.',
+        'No episodes were found for this series.',
+      ),
+    );
   }
 
   static Future<IptvSeriesDetails> fetchSeriesDetails(
@@ -801,13 +973,20 @@ class ApiService {
     ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+      throw Exception(
+        '${AppLanguage.text('Servidor Xtream retornou HTTP', 'Xtream server returned HTTP')} ${response.statusCode}.',
+      );
     }
 
     final decoded = _decodeObject(response.body);
     final episodes = decoded['episodes'];
     if (episodes is! Map || episodes.isEmpty) {
-      throw Exception('Nenhum episodio encontrado para esta serie.');
+      throw Exception(
+        AppLanguage.text(
+          'Nenhum episodio encontrado para esta serie.',
+          'No episodes were found for this series.',
+        ),
+      );
     }
 
     final seasons = <IptvSeriesSeason>[];
@@ -842,8 +1021,8 @@ class ApiService {
           IptvSeriesSeason(
             id: seasonId.isNotEmpty ? seasonId : '${seasons.length + 1}',
             title: seasonNumber > 0
-                ? 'Temporada $seasonNumber'
-                : 'Temporada ${seasons.length + 1}',
+                ? '${AppLanguage.text('Temporada', 'Season')} $seasonNumber'
+                : '${AppLanguage.text('Temporada', 'Season')} ${seasons.length + 1}',
             episodes: seasonEpisodes,
           ),
         );
@@ -851,7 +1030,12 @@ class ApiService {
     }
 
     if (seasons.isEmpty) {
-      throw Exception('Nenhum episodio encontrado para esta serie.');
+      throw Exception(
+        AppLanguage.text(
+          'Nenhum episodio encontrado para esta serie.',
+          'No episodes were found for this series.',
+        ),
+      );
     }
 
     final info = decoded['info'] is Map
@@ -884,10 +1068,12 @@ class ApiService {
 
     final episodeTitle = _stringValue(
       json['title'] ?? json['name'],
-      fallback: 'Episodio',
+      fallback: AppLanguage.text('Episodio', 'Episode'),
     );
     final episodeNum = _stringValue(json['episode_num'] ?? json['episode']);
-    final seasonLabel = seasonNumber > 0 ? 'T$seasonNumber' : 'Temporada';
+    final seasonLabel = seasonNumber > 0
+        ? '${AppLanguage.text('T', 'S')}$seasonNumber'
+        : AppLanguage.text('Temporada', 'Season');
     final episodeLabel = episodeNum.isNotEmpty ? 'E$episodeNum' : '';
     final prefix =
         [seasonLabel, episodeLabel].where((part) => part.isNotEmpty).join(' ');
@@ -919,11 +1105,44 @@ class ApiService {
     await prefs.remove('selected_server_url');
     await prefs.remove('selected_server_name');
     await prefs.remove(_continueWatchingKey);
+    await prefs.remove(_providerStatusNextCheckKey);
+    await prefs.remove(_providerStatusCodeKey);
+    await prefs.remove(_authorizationNoticeKey);
+    await prefs.remove(_appLoginLicenseCodeKey);
+    await prefs.remove(_appLoginUsernameKey);
+    await prefs.remove(_appLoginPasswordKey);
+    AppLanguage.setPreferredLanguage(null);
+  }
+
+  static Future<String?> consumeAuthorizationNotice() async {
+    final prefs = await SharedPreferences.getInstance();
+    final notice = prefs.getString(_authorizationNoticeKey);
+    if (notice != null) {
+      await prefs.remove(_authorizationNoticeKey);
+    }
+    return notice;
   }
 
   static Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('auth_token');
+  }
+
+  static Future<
+          ({DateTime? expiresAt, String preferredLanguage, String accountType})>
+      getSavedLicenseDisplayInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    final license = _savedLicenseData(prefs);
+    final user = _savedUserData(prefs);
+    final preferredLanguage =
+        _stringValue(user?['preferred_language']).toLowerCase();
+    final accountType = _stringValue(user?['account_type']).toUpperCase();
+    final expiresAt = license == null ? null : _sessionExpiryDate(license);
+    return (
+      expiresAt: expiresAt ?? (user == null ? null : _sessionExpiryDate(user)),
+      preferredLanguage: preferredLanguage.startsWith('en') ? 'en' : 'pt',
+      accountType: accountType,
+    );
   }
 
   static Future<bool> hasSavedSession() async {
@@ -954,10 +1173,31 @@ class ApiService {
   static Future<bool> validateSavedSession({
     String? deviceId,
     bool revalidateWithServer = false,
+    http.Client? client,
   }) async {
     final localValid = await isSavedSessionLocallyValid();
     if (!localValid) {
       return false;
+    }
+
+    if (revalidateWithServer) {
+      final prefs = await SharedPreferences.getInstance();
+      final user = _savedUserData(prefs);
+      final providerCode = _stringValue(
+        user?['provider_code'] ??
+            user?['providerCode'] ??
+            _providerCodeFromJwt(prefs.getString('auth_token') ?? ''),
+      );
+      if (providerCode.isNotEmpty) {
+        return _validateProviderStatus(
+          providerCode,
+          deviceId: _stringValue(deviceId),
+          client: client,
+        );
+      }
+      if (_savedAppLoginCredentials(prefs) != null) {
+        return true;
+      }
     }
 
     if (!revalidateWithServer ||
@@ -966,17 +1206,49 @@ class ApiService {
       return true;
     }
 
+    final normalizedDeviceId = _stringValue(deviceId);
+    final existing = _deviceSessionChecksInFlight[normalizedDeviceId];
+    if (existing != null) {
+      return existing;
+    }
+
+    final check = _validateWithDeviceLogin(
+      normalizedDeviceId,
+      client: client,
+    );
+    _deviceSessionChecksInFlight[normalizedDeviceId] = check;
     try {
-      final response = await http
-          .post(
-            Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Device-Id': _stringValue(deviceId),
-            },
-            body: jsonEncode({'deviceId': deviceId}),
-          )
-          .timeout(_sessionValidationTimeout);
+      return await check;
+    } finally {
+      if (identical(_deviceSessionChecksInFlight[normalizedDeviceId], check)) {
+        _deviceSessionChecksInFlight.remove(normalizedDeviceId);
+      }
+    }
+  }
+
+  static Future<bool> _validateWithDeviceLogin(
+    String deviceId, {
+    http.Client? client,
+  }) async {
+    try {
+      final request = client == null
+          ? http.post(
+              Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Device-Id': deviceId,
+              },
+              body: jsonEncode({'deviceId': deviceId}),
+            )
+          : client.post(
+              Uri.parse('$appBaseUrl/v1/auth/app/device-login'),
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Device-Id': deviceId,
+              },
+              body: jsonEncode({'deviceId': deviceId}),
+            );
+      final response = await request.timeout(_sessionValidationTimeout);
 
       final decoded = _decodeObject(response.body);
       if (response.statusCode == 200 && decoded['success'] == true) {
@@ -1000,16 +1272,258 @@ class ApiService {
         return false;
       }
 
-      return localValid;
+      return isSavedSessionLocallyValid();
     } catch (_) {
-      return localValid;
+      return isSavedSessionLocallyValid();
     }
+  }
+
+  static Future<bool> _validateProviderStatus(
+    String providerCode, {
+    required String deviceId,
+    http.Client? client,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token') ?? '';
+
+    final nextCheckAt = prefs.getInt(_providerStatusNextCheckKey) ?? 0;
+    if (token.isNotEmpty &&
+        token != 'authenticated' &&
+        prefs.getString(_providerStatusCodeKey) == providerCode &&
+        nextCheckAt > DateTime.now().millisecondsSinceEpoch) {
+      return true;
+    }
+
+    final key = jsonEncode([providerCode, token]);
+    final existing = _providerStatusChecksInFlight[key];
+    if (existing != null) {
+      return existing;
+    }
+
+    final check = _performProviderStatusCheck(
+      providerCode,
+      token,
+      deviceId: deviceId,
+      client: client,
+    );
+    _providerStatusChecksInFlight[key] = check;
+    try {
+      return await check;
+    } finally {
+      if (identical(_providerStatusChecksInFlight[key], check)) {
+        _providerStatusChecksInFlight.remove(key);
+      }
+    }
+  }
+
+  static String _providerCodeFromJwt(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) {
+      return '';
+    }
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      if (payload is! Map) {
+        return '';
+      }
+      return _stringValue(payload['providerCode'] ?? payload['provider_code']);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  static Future<bool> _performProviderStatusCheck(
+    String providerCode,
+    String savedToken, {
+    required String deviceId,
+    http.Client? client,
+  }) async {
+    var token = savedToken;
+    try {
+      if (token.isEmpty || token == 'authenticated' || _isExpiredJwt(token)) {
+        final renewed = await _renewProviderToken(
+          providerCode,
+          token,
+          deviceId: deviceId,
+          client: client,
+        );
+        if (renewed.denied) {
+          return _revokeProviderAccessIfCurrent(token);
+        }
+        if (renewed.token == null) {
+          return true;
+        }
+        token = renewed.token!;
+      }
+
+      var response = await _requestProviderStatus(
+        providerCode,
+        token,
+        client: client,
+      );
+      if (response.statusCode == 401 && token == savedToken) {
+        final renewed = await _renewProviderToken(
+          providerCode,
+          token,
+          deviceId: deviceId,
+          client: client,
+        );
+        if (renewed.denied) {
+          return _revokeProviderAccessIfCurrent(token);
+        }
+        if (renewed.token == null) {
+          return true;
+        }
+        token = renewed.token!;
+        response = await _requestProviderStatus(
+          providerCode,
+          token,
+          client: client,
+        );
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getString('auth_token') != token) {
+        return isSavedSessionLocallyValid();
+      }
+
+      final decoded = _decodeObject(response.body);
+      if (decoded['access_allowed'] == false || response.statusCode == 403) {
+        return _revokeProviderAccessIfCurrent(token);
+      }
+
+      if (response.statusCode == 200 && decoded['access_allowed'] == true) {
+        final requestedSeconds = _intValue(decoded['next_check_seconds']);
+        final intervalSeconds = requestedSeconds > 0
+            ? requestedSeconds.clamp(300, 86400)
+            : _providerStatusDefaultInterval.inSeconds;
+        await prefs.setString(_providerStatusCodeKey, providerCode);
+        await prefs.setInt(
+          _providerStatusNextCheckKey,
+          DateTime.now()
+              .add(Duration(seconds: intervalSeconds))
+              .millisecondsSinceEpoch,
+        );
+      }
+      return true;
+    } catch (_) {
+      return true; // Offline/5xx is not evidence that access was revoked.
+    }
+  }
+
+  static Future<bool> _revokeProviderAccessIfCurrent(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString('auth_token') != token) {
+      return isSavedSessionLocallyValid();
+    }
+    await logout();
+    await prefs.setString(_authorizationNoticeKey, _authorizationDeniedMessage);
+    return false;
+  }
+
+  static Future<http.Response> _requestProviderStatus(
+    String providerCode,
+    String token, {
+    http.Client? client,
+  }) {
+    final request = client == null
+        ? http.post(
+            Uri.parse('$baseUrl/v1/provider/license/status'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'providerCode': providerCode}),
+          )
+        : client.post(
+            Uri.parse('$baseUrl/v1/provider/license/status'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'providerCode': providerCode}),
+          );
+    return request.timeout(_providerStatusTimeout);
+  }
+
+  static Future<({String? token, bool denied})> _renewProviderToken(
+    String providerCode,
+    String oldToken, {
+    required String deviceId,
+    http.Client? client,
+  }) async {
+    if (deviceId.isEmpty) {
+      return (token: null, denied: false);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final savedLogin = _savedAppLoginCredentials(prefs);
+    final server = savedLogin == null ? await getActiveServer() : null;
+    final username = savedLogin?.username ?? server?.username ?? '';
+    final password = savedLogin?.password ?? server?.password ?? '';
+    final licenseCode = savedLogin?.licenseCode ?? providerCode;
+    if (licenseCode.isEmpty || username.isEmpty || password.isEmpty) {
+      return (token: null, denied: false);
+    }
+
+    final uri = Uri.parse('$baseUrl/v1/auth/app/login');
+    final body = jsonEncode({
+      'licenseCode': licenseCode,
+      'username': username,
+      'password': password,
+      'deviceId': deviceId,
+    });
+    final request = client == null
+        ? http.post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: body,
+          )
+        : client.post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: body,
+          );
+    final response = await request.timeout(_sessionValidationTimeout);
+    if (response.statusCode != 200) {
+      Map<String, dynamic> decoded;
+      try {
+        decoded = _decodeObject(response.body);
+      } catch (_) {
+        return (token: null, denied: false);
+      }
+      final error = _stringValue(decoded['error']).toLowerCase();
+      final denied = decoded['access_allowed'] == false ||
+          response.statusCode == 403 ||
+          error.contains('não reconhecido') ||
+          error.contains('provedor bloqueado') ||
+          error.contains('provedor inativo');
+      return (token: null, denied: denied);
+    }
+    final decoded = _decodeObject(response.body);
+    final newToken = _stringValue(
+      decoded['token'] ??
+          decoded['authToken'] ??
+          decoded['access_token'] ??
+          decoded['sessionToken'],
+    );
+    if (decoded['success'] != true || newToken.isEmpty) {
+      return (token: null, denied: false);
+    }
+
+    if (prefs.getString('auth_token') != oldToken) {
+      return (token: null, denied: false);
+    }
+    await _saveSessionPayload(decoded);
+    return (token: newToken, denied: false);
   }
 
   static Future<void> _saveSessionPayload(Map<String, dynamic> decoded) async {
     final prefs = await SharedPreferences.getInstance();
 
     if (decoded['user'] != null) {
+      AppLanguage.updateFromLoginResponse(decoded);
       await prefs.setString('user_data', jsonEncode(decoded['user']));
     }
 
@@ -1019,6 +1533,28 @@ class ApiService {
 
     if (decoded['servers'] != null) {
       await prefs.setString('servers_data', jsonEncode(decoded['servers']));
+      final servers = await getSavedServers();
+      if (servers.isNotEmpty) {
+        final selected = decoded['selected_server'];
+        IptvServer? target;
+        if (selected is Map) {
+          final selectedId = _stringValue(selected['id']);
+          final rawSelectedUrl =
+              _stringValue(selected['url'] ?? selected['server_url']);
+          final selectedUrl =
+              rawSelectedUrl.isEmpty ? '' : _cleanBaseUrl(rawSelectedUrl);
+          for (final server in servers) {
+            if ((selectedId.isNotEmpty && server.id == selectedId) ||
+                (selectedUrl.isNotEmpty &&
+                    server.cleanBaseUrl == selectedUrl)) {
+              target = server;
+              break;
+            }
+          }
+        }
+        target ??= await getActiveServer();
+        await selectActiveServer(target ?? servers.first);
+      }
     }
 
     final token = _stringValue(
@@ -1030,6 +1566,32 @@ class ApiService {
     await prefs.setString(
       'auth_token',
       token.isNotEmpty ? token : 'authenticated',
+    );
+  }
+
+  static Future<void> _saveAppLoginCredentials({
+    required String licenseCode,
+    required String username,
+    required String password,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_appLoginLicenseCodeKey, licenseCode.trim());
+    await prefs.setString(_appLoginUsernameKey, username.trim());
+    await prefs.setString(_appLoginPasswordKey, password);
+  }
+
+  static ({String licenseCode, String username, String password})?
+      _savedAppLoginCredentials(SharedPreferences prefs) {
+    final licenseCode = prefs.getString(_appLoginLicenseCodeKey)?.trim() ?? '';
+    final username = prefs.getString(_appLoginUsernameKey)?.trim() ?? '';
+    final password = prefs.getString(_appLoginPasswordKey) ?? '';
+    if (licenseCode.isEmpty || username.isEmpty || password.isEmpty) {
+      return null;
+    }
+    return (
+      licenseCode: licenseCode,
+      username: username,
+      password: password,
     );
   }
 
@@ -1229,7 +1791,13 @@ class ApiService {
         ContinueWatchingItem(
           item: IptvContentItem(
             id: _contentItemIdFromPlaybackId(contentId),
-            title: _stringValue(raw['title'], fallback: 'Continuar assistindo'),
+            title: _stringValue(
+              raw['title'],
+              fallback: AppLanguage.text(
+                'Continuar assistindo',
+                'Continue watching',
+              ),
+            ),
             subtitle: _stringValue(raw['subtitle']),
             category: _stringValue(raw['category']),
             categoryId: _stringValue(raw['categoryId']),
@@ -1381,10 +1949,20 @@ class ApiService {
   static Future<IptvServer> _requireActiveServer() async {
     final server = await getActiveServer();
     if (server == null) {
-      throw Exception('Servidor nao configurado. Faca login novamente.');
+      throw Exception(
+        AppLanguage.text(
+          'Servidor nao configurado. Faca login novamente.',
+          'Server not configured. Sign in again.',
+        ),
+      );
     }
     if (!_hasRequiredServerCredentials(server)) {
-      throw Exception('Credenciais Xtream nao encontradas para este servidor.');
+      throw Exception(
+        AppLanguage.text(
+          'Credenciais Xtream nao encontradas para este servidor.',
+          'Xtream credentials were not found for this server.',
+        ),
+      );
     }
     return server;
   }
@@ -1467,7 +2045,13 @@ class ApiService {
     if (response.statusCode < 200 ||
         response.statusCode >= 300 ||
         decoded['success'] != true) {
-      throw Exception(decoded['error'] ?? 'Falha ao carregar canais IPTV.');
+      throw Exception(
+        decoded['error'] ??
+            AppLanguage.text(
+              'Falha ao carregar canais IPTV.',
+              'Unable to load IPTV channels.',
+            ),
+      );
     }
 
     final data = decoded['data'];
@@ -1490,7 +2074,9 @@ class ApiService {
     ).timeout(_requestTimeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Servidor Xtream retornou HTTP ${response.statusCode}.');
+      throw Exception(
+        '${AppLanguage.text('Servidor Xtream retornou HTTP', 'Xtream server returned HTTP')} ${response.statusCode}.',
+      );
     }
 
     final decoded = jsonDecode(response.body);
@@ -1508,7 +2094,11 @@ class ApiService {
     List<IptvContentItem> items, {
     required bool useXtreamFallback,
   }) async {
-    final centralResult = await _attachCentralLiveEpg(server, items);
+    final central = await _attachCentralLiveEpg(server, items);
+    final centralResult = central.items;
+    if (!central.success) {
+      return centralResult;
+    }
     final pendingItems = centralResult
         .asMap()
         .entries
@@ -1517,7 +2107,7 @@ class ApiService {
     if (pendingItems.isEmpty) {
       return centralResult;
     }
-    if (!useXtreamFallback) {
+    if (!useXtreamFallback || items.length != 1) {
       final result = List<IptvContentItem>.from(centralResult);
       for (final entry in pendingItems) {
         result[entry.key] = _itemWithoutLiveEpg(entry.value);
@@ -1525,22 +2115,10 @@ class ApiService {
       return result;
     }
 
-    const batchSize = 10;
     final result = List<IptvContentItem>.from(centralResult);
-
-    for (var start = 0; start < pendingItems.length; start += batchSize) {
-      final end = (start + batchSize).clamp(0, pendingItems.length);
-      final updates = await Future.wait(
-        [
-          for (var index = start; index < end; index++)
-            _itemWithShortEpg(server, pendingItems[index].value),
-        ],
-      );
-      for (var offset = 0; offset < updates.length; offset++) {
-        result[pendingItems[start + offset].key] = updates[offset];
-      }
+    for (final entry in pendingItems) {
+      result[entry.key] = await _itemWithShortEpg(server, entry.value);
     }
-
     return result;
   }
 
@@ -1560,36 +2138,108 @@ class ApiService {
     );
   }
 
-  static Future<List<IptvContentItem>> _attachCentralLiveEpg(
+  static Future<({List<IptvContentItem> items, bool success})>
+      _attachCentralLiveEpg(
     IptvServer server,
     List<IptvContentItem> items,
   ) async {
     if (items.isEmpty) {
-      return const [];
+      return (items: <IptvContentItem>[], success: true);
     }
 
     const batchSize = 120;
     final result = List<IptvContentItem>.from(items);
+    final freshData = <String, Map<String, dynamic>>{};
+    var centralSucceeded = true;
 
     for (var start = 0; start < result.length; start += batchSize) {
       final end = (start + batchSize).clamp(0, result.length);
       final batch = result.sublist(start, end);
-      final epgByChannel = await _fetchCentralNowNext(batch);
-      if (epgByChannel.isEmpty) {
-        continue;
+      final requestsByKey = <String, Future<_CentralEpgBatchResult>>{};
+      final missing = <IptvContentItem>[];
+      for (final item in batch) {
+        final key = _centralEpgInFlightKey(server, item);
+        final inFlight = _centralEpgInFlight[key];
+        if (inFlight == null) {
+          missing.add(item);
+        } else {
+          requestsByKey[key] = inFlight;
+        }
       }
-      await _saveCentralLiveEpgCache(server, epgByChannel);
+
+      Future<_CentralEpgBatchResult>? newRequest;
+      if (missing.isNotEmpty) {
+        newRequest = _fetchCentralNowNext(missing);
+        for (final item in missing) {
+          final key = _centralEpgInFlightKey(server, item);
+          _centralEpgInFlight[key] = newRequest;
+          requestsByKey[key] = newRequest;
+        }
+        final completedRequest = newRequest;
+        void clearInFlight() {
+          for (final item in missing) {
+            final key = _centralEpgInFlightKey(server, item);
+            if (identical(_centralEpgInFlight[key], completedRequest)) {
+              _centralEpgInFlight.remove(key);
+            }
+          }
+        }
+
+        unawaited(completedRequest.then(
+          (_) => clearInFlight(),
+          onError: (_) => clearInFlight(),
+        ));
+      }
+
+      final uniqueRequests = requestsByKey.values.toSet().toList();
+      final responses = await Future.wait(uniqueRequests);
+      final responseByRequest =
+          <Future<_CentralEpgBatchResult>, _CentralEpgBatchResult>{
+        for (var index = 0; index < uniqueRequests.length; index++)
+          uniqueRequests[index]: responses[index],
+      };
+      if (newRequest != null) {
+        freshData.addAll(responseByRequest[newRequest]?.data ?? const {});
+      }
 
       for (var offset = 0; offset < batch.length; offset++) {
         final item = batch[offset];
-        final epg = _epgForItem(item, epgByChannel);
+        final response = responseByRequest[
+            requestsByKey[_centralEpgInFlightKey(server, item)]];
+        if (response == null) {
+          centralSucceeded = false;
+          continue;
+        }
+        centralSucceeded &= response.success;
+        final epg = _epgForItem(item, response.data);
         if (epg != null) {
           result[start + offset] = _itemWithNowNextEpg(item, epg);
         }
       }
     }
 
-    return result;
+    if (freshData.isNotEmpty) {
+      try {
+        await _saveCentralLiveEpgCache(server, freshData);
+      } catch (_) {
+        if (epgDiagnosticsEnabled) {
+          debugPrint('EPG cache write failed');
+        }
+      }
+    }
+    return (items: result, success: centralSucceeded);
+  }
+
+  static String _centralEpgInFlightKey(
+    IptvServer server,
+    IptvContentItem item,
+  ) {
+    return jsonEncode([
+      _centralLiveEpgCacheKey(server),
+      item.id,
+      item.epgChannelId,
+      item.title,
+    ]);
   }
 
   static Future<List<IptvContentItem>> _applyCachedCentralLiveEpg(
@@ -1612,10 +2262,18 @@ class ApiService {
         return item;
       }
       final epg = _epgForItem(item, epgByChannel);
-      if (epg == null || !_cachedNowNextIsUsable(epg, savedAt)) {
-        return item;
+      final epgSavedAt = epg == null ? savedAt : _epgCachedAt(epg, savedAt);
+      if (epg != null && _cachedNowNextIsUsable(epg, epgSavedAt)) {
+        return _itemWithNowNextEpg(item, epg);
       }
-      return _itemWithNowNextEpg(item, epg);
+      final checked = _epgRowForItem(item, epgByChannel);
+      if (checked != null &&
+          !_hasNowNextData(checked) &&
+          DateTime.now().difference(_epgCachedAt(checked, savedAt)) <
+              _missingLiveEpgRefreshInterval) {
+        return _itemWithoutLiveEpg(item);
+      }
+      return item;
     }).toList();
   }
 
@@ -1684,19 +2342,37 @@ class ApiService {
     if (freshData.isEmpty) {
       return;
     }
+    final key = _centralLiveEpgCacheKey(server);
+    final previousWrite = _centralEpgCacheWrites[key];
+    Future<void> write() async {
+      final cached = await _readCentralLiveEpgCache(server);
+      final merged = Map<String, Map<String, dynamic>>.from(cached.$1);
+      final savedAt = DateTime.now().millisecondsSinceEpoch;
+      for (final entry in freshData.entries) {
+        merged[entry.key] = {...entry.value, '_cachedAt': savedAt};
+      }
 
-    final cached = await _readCentralLiveEpgCache(server);
-    final merged = Map<String, Map<String, dynamic>>.from(cached.$1);
-    merged.addAll(freshData);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        key,
+        jsonEncode({
+          'updatedAt': savedAt,
+          'data': merged,
+        }),
+      );
+    }
 
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _centralLiveEpgCacheKey(server),
-      jsonEncode({
-        'updatedAt': DateTime.now().millisecondsSinceEpoch,
-        'data': merged,
-      }),
-    );
+    final currentWrite = previousWrite == null
+        ? write()
+        : previousWrite.then((_) => write(), onError: (_) => write());
+    _centralEpgCacheWrites[key] = currentWrite;
+    try {
+      await currentWrite;
+    } finally {
+      if (identical(_centralEpgCacheWrites[key], currentWrite)) {
+        _centralEpgCacheWrites.remove(key);
+      }
+    }
   }
 
   static bool _cachedNowNextIsUsable(
@@ -1724,12 +2400,19 @@ class ApiService {
         age < const Duration(hours: 4);
   }
 
+  static DateTime _epgCachedAt(Map<String, dynamic> epg, DateTime fallback) {
+    final timestamp = _intValue(epg['_cachedAt']);
+    return timestamp > 0
+        ? DateTime.fromMillisecondsSinceEpoch(timestamp)
+        : fallback;
+  }
+
   static String _centralLiveEpgCacheKey(IptvServer server) {
     final serverKey = server.id.isNotEmpty ? server.id : server.cleanBaseUrl;
     return '$_liveNowNextCachePrefix:$serverKey';
   }
 
-  static Future<Map<String, Map<String, dynamic>>> _fetchCentralNowNext(
+  static Future<_CentralEpgBatchResult> _fetchCentralNowNext(
     List<IptvContentItem> items,
   ) async {
     final channelIds = items
@@ -1739,12 +2422,25 @@ class ApiService {
         .toList();
     final channels = items.map(_epgLookupChannel).toList();
     if (channelIds.isEmpty && channels.isEmpty) {
-      return const {};
+      return const _CentralEpgBatchResult(success: true, data: {});
     }
 
+    final stopwatch = Stopwatch()..start();
+    var statusCode = 0;
+    var responseBytes = 0;
+    var matched = 0;
+    var encoding = 'identity';
+    var authMode = 'none';
+    var available = false;
+    var source = 'unknown';
     try {
       final headers = await _epgRequestHeaders();
-      final response = await http
+      authMode = headers.containsKey('Authorization')
+          ? 'bearer'
+          : headers.containsKey('X-Server-Id')
+              ? 'server'
+              : 'none';
+      final response = await _epgHttpClient
           .post(
             Uri.parse('$baseUrl/epg/now-next'),
             headers: headers,
@@ -1754,12 +2450,18 @@ class ApiService {
             }),
           )
           .timeout(const Duration(seconds: 7));
+      statusCode = response.statusCode;
+      responseBytes = response.bodyBytes.length;
+      encoding = response.headers['content-encoding'] ?? 'identity';
 
       final decoded = _decodeObject(response.body);
+      available = decoded['available'] == true;
+      source = _stringValue(decoded['source'], fallback: 'unknown');
       if (response.statusCode < 200 ||
           response.statusCode >= 300 ||
-          decoded['success'] != true) {
-        return const {};
+          decoded['success'] != true ||
+          decoded['available'] == false) {
+        return const _CentralEpgBatchResult(success: false, data: {});
       }
 
       final data = decoded['data'];
@@ -1779,8 +2481,11 @@ class ApiService {
           for (final channelId in _epgResponseIds(epg)) {
             result[channelId] = epg;
           }
+          if (_hasNowNextData(epg)) {
+            matched++;
+          }
         }
-        return result;
+        return _CentralEpgBatchResult(success: true, data: result);
       }
 
       if (data is Map) {
@@ -1797,13 +2502,25 @@ class ApiService {
           for (final channelId in _epgResponseIds(epg)) {
             result[channelId] = epg;
           }
+          if (_hasNowNextData(epg)) {
+            matched++;
+          }
         }
-        return result;
+        return _CentralEpgBatchResult(success: true, data: result);
       }
 
-      return const {};
+      return const _CentralEpgBatchResult(success: false, data: {});
     } catch (_) {
-      return const {};
+      return const _CentralEpgBatchResult(success: false, data: {});
+    } finally {
+      if (epgDiagnosticsEnabled) {
+        debugPrint(
+          'EPG central channels=${channels.length} matched=$matched '
+          'status=$statusCode elapsedMs=${stopwatch.elapsedMilliseconds} '
+          'decodedBytes=$responseBytes encoding=$encoding '
+          'auth=$authMode available=$available source=$source',
+        );
+      }
     }
   }
 
@@ -1826,10 +2543,33 @@ class ApiService {
     final serverId = prefs.getString('selected_server_id') ?? '';
     return {
       'Content-Type': 'application/json',
-      if (token.isNotEmpty && token != 'authenticated')
+      if (token.isNotEmpty && token != 'authenticated' && !_isExpiredJwt(token))
         'Authorization': 'Bearer $token',
       if (serverId.isNotEmpty) 'X-Server-Id': serverId,
     };
+  }
+
+  static bool _isExpiredJwt(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) {
+      return false;
+    }
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      if (payload is! Map) {
+        return false;
+      }
+      final expiresAt = payload['exp'];
+      if (expiresAt is! num) {
+        return false;
+      }
+      final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return expiresAt <= nowSeconds + 30;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Map<String, dynamic> _epgLookupChannel(IptvContentItem item) {
@@ -1934,6 +2674,19 @@ class ApiService {
     for (final id in _epgLookupIds(item)) {
       final epg = epgByChannel[id];
       if (epg != null && _hasNowNextData(epg)) {
+        return epg;
+      }
+    }
+    return null;
+  }
+
+  static Map<String, dynamic>? _epgRowForItem(
+    IptvContentItem item,
+    Map<String, Map<String, dynamic>> epgByChannel,
+  ) {
+    for (final id in _epgLookupIds(item)) {
+      final epg = epgByChannel[id];
+      if (epg != null) {
         return epg;
       }
     }
@@ -2289,8 +3042,10 @@ class ApiService {
         .map((item) {
           return CategoryOption(
             id: _stringValue(item['category_id']),
-            label:
-                _stringValue(item['category_name'], fallback: 'Sem Categoria'),
+            label: _stringValue(
+              item['category_name'],
+              fallback: AppLanguage.text('Sem Categoria', 'Uncategorized'),
+            ),
           );
         })
         .where((item) => item.id.isNotEmpty)

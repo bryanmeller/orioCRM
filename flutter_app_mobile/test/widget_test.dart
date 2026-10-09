@@ -6,7 +6,7 @@ import 'package:orio_crm_mobile/main.dart';
 
 void main() {
   testWidgets('Initial screen loads correctly', (WidgetTester tester) async {
-    await tester.pumpWidget(const StreamFlixApp(initialRoute: '/'));
+    await tester.pumpWidget(const OrioPlayerApp(initialRoute: '/'));
 
     expect(
       find.byWidgetPredicate(

@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'api_service.dart';
+import 'app_language.dart';
 import 'player_return_guard.dart';
 import 'tv_safe_area.dart';
 
@@ -50,6 +51,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _controller;
   media_kit.Player? _mediaKitPlayer;
   media_kit_video.VideoController? _mediaKitController;
+  Widget? _videoPlayerView;
+  Widget? _mediaKitVideoView;
   StreamSubscription<Duration>? _mediaKitPositionSubscription;
   StreamSubscription<Duration>? _mediaKitDurationSubscription;
   StreamSubscription<bool>? _mediaKitPlayingSubscription;
@@ -58,6 +61,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _positionTimer;
   Timer? _reconnectTimer;
   Timer? _controlsTimer;
+  Timer? _seekDebounceTimer;
+  Timer? _channelMenuEpgTimer;
   final FocusNode _playerFocusNode = FocusNode();
   final ScrollController _channelMenuScrollController = ScrollController();
 
@@ -71,7 +76,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String _activeContentId = '';
   String _activeFavoriteId = '';
   String _activeRendererLabel = 'ExoPlayer TextureView';
-  String _loadingStatus = 'Preparando stream...';
+  String _loadingStatus =
+      AppLanguage.text('Preparando stream...', 'Preparing stream...');
   int _loadingSeconds = 0;
   int _reconnectAttempts = 0;
   Duration _mediaKitDuration = Duration.zero;
@@ -88,11 +94,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String _focusedControl = 'progress';
   int _focusedLiveCategoryIndex = 0;
   int _focusedLiveChannelIndex = 0;
+  int _channelMenuEpgRefreshToken = 0;
   String _selectedLiveCategoryId = '';
+  List<IptvContentItem> _channelMenuLiveChannels = const [];
   final Set<String> _favoriteIds = {};
+  final Set<String> _channelMenuEpgLoadingIds = {};
+  DateTime? _channelMenuEpgRetryAfter;
   DateTime? _lastBackActionAt;
   Duration _lastPosition = Duration.zero;
+  Duration? _pendingSeekTarget;
   int _lastSavedProgressSecond = -1;
+  bool _seekInProgress = false;
 
   static const Map<String, String> _iptvHeaders = {
     'User-Agent':
@@ -126,6 +138,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _activeCategory = widget.category;
     _activeContentId = widget.contentId;
     _activeFavoriteId = widget.favoriteId;
+    _channelMenuLiveChannels = List<IptvContentItem>.from(widget.liveChannels);
     _focusedLiveChannelIndex = _initialLiveChannelIndex();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -158,6 +171,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _positionTimer?.cancel();
     _reconnectTimer?.cancel();
     _controlsTimer?.cancel();
+    _seekDebounceTimer?.cancel();
+    _channelMenuEpgTimer?.cancel();
     _channelMenuScrollController.dispose();
     _playerFocusNode.dispose();
     unawaited(_disposeMediaKitPlayer());
@@ -230,8 +245,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   List<IptvContentItem> get _liveChannels {
-    if (widget.liveChannels.isNotEmpty) {
-      return widget.liveChannels;
+    if (_channelMenuLiveChannels.isNotEmpty) {
+      return _channelMenuLiveChannels;
     }
     return [
       IptvContentItem(
@@ -253,9 +268,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   List<_LiveCategoryOption> get _liveCategories {
     final channels = _liveChannels;
     final categories = <_LiveCategoryOption>[
-      const _LiveCategoryOption(
+      _LiveCategoryOption(
         id: _favoritesCategoryId,
-        label: 'Favoritos',
+        label: AppLanguage.text('Favoritos', 'Favorites'),
       ),
     ];
     final seen = <String>{};
@@ -265,7 +280,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         categories.add(
           _LiveCategoryOption(
             id: id,
-            label: channel.category.isNotEmpty ? channel.category : 'Geral',
+            label: channel.category.isNotEmpty
+                ? channel.category
+                : AppLanguage.text('Geral', 'General'),
           ),
         );
       }
@@ -286,6 +303,81 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return channels.where((channel) {
       return _liveChannelCategoryId(channel) == _selectedLiveCategoryId;
     }).toList();
+  }
+
+  void _queueChannelMenuEpgRefresh() {
+    if (!_isLiveContent ||
+        !_channelMenuVisible ||
+        _channelMenuShowingCategories) {
+      return;
+    }
+    final retryAfter = _channelMenuEpgRetryAfter;
+    if (retryAfter != null && DateTime.now().isBefore(retryAfter)) {
+      return;
+    }
+    _channelMenuEpgTimer?.cancel();
+    _channelMenuEpgTimer = Timer(const Duration(milliseconds: 250), () {
+      if (mounted && _channelMenuVisible && !_channelMenuShowingCategories) {
+        unawaited(_refreshChannelMenuEpgItems());
+      }
+    });
+  }
+
+  Future<void> _refreshChannelMenuEpgItems() async {
+    final channels = _selectedLiveCategoryChannels;
+    if (channels.isEmpty) {
+      return;
+    }
+    final start =
+        _focusedLiveChannelIndex > 4 ? _focusedLiveChannelIndex - 4 : 0;
+    final end = (start + 16).clamp(0, channels.length);
+    final items = channels.sublist(start, end).where((item) {
+      return item.type == 'live' &&
+          !item.liveEpgChecked &&
+          !_channelMenuEpgLoadingIds.contains(item.id);
+    }).toList();
+    if (items.isEmpty) {
+      return;
+    }
+
+    final token = _channelMenuEpgRefreshToken;
+    final categoryId = _selectedLiveCategoryId;
+    _channelMenuEpgLoadingIds.addAll(items.map((item) => item.id));
+    try {
+      final updated = await ApiService.fetchLiveEpgItems(
+        items,
+        useXtreamFallback: false,
+      );
+      if (!mounted ||
+          !_channelMenuVisible ||
+          _channelMenuShowingCategories ||
+          token != _channelMenuEpgRefreshToken ||
+          categoryId != _selectedLiveCategoryId) {
+        return;
+      }
+      if (updated.every((item) => !item.liveEpgChecked)) {
+        _channelMenuEpgRetryAfter =
+            DateTime.now().add(const Duration(seconds: 15));
+        return;
+      }
+      final updatedById = {for (final item in updated) item.id: item};
+      setState(() {
+        _channelMenuLiveChannels = _channelMenuLiveChannels.map((item) {
+          final refreshed = updatedById[item.id] ?? item;
+          if (refreshed.id == _activeFavoriteId) {
+            _activeSubtitle = refreshed.subtitle;
+          }
+          return refreshed;
+        }).toList();
+      });
+    } catch (_) {
+      _channelMenuEpgRetryAfter =
+          DateTime.now().add(const Duration(seconds: 15));
+    } finally {
+      for (final item in items) {
+        _channelMenuEpgLoadingIds.remove(item.id);
+      }
+    }
   }
 
   String _liveChannelCategoryId(IptvContentItem channel) {
@@ -343,7 +435,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     ]);
 
     if (candidates.isEmpty) {
-      setState(() => _errorMessage = 'URL do video invalida.');
+      setState(() => _errorMessage = AppLanguage.text(
+            'URL do vídeo inválida.',
+            'Invalid video URL.',
+          ));
       return;
     }
 
@@ -385,10 +480,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   String _playbackFailureMessage(Object? lastError) {
     if (_isLiveContent) {
-      return 'Nao foi possivel abrir este canal. O app tentou as alternativas HLS/TS disponiveis, mas o stream pode estar fora do ar ou ser incompativel com esta TV.';
+      return AppLanguage.text(
+        'Não foi possível abrir este canal. O app tentou as alternativas HLS/TS disponíveis, mas o stream pode estar fora do ar ou ser incompatível com este dispositivo.',
+        'This channel could not be opened. The app tried the available HLS/TS alternatives, but the stream may be offline or incompatible with this device.',
+      );
     }
     return lastError?.toString() ??
-        'Nenhuma URL de reproducao funcionou para este conteudo.';
+        AppLanguage.text(
+          'Nenhuma URL de reprodução funcionou para este conteúdo.',
+          'No playback URL worked for this content.',
+        );
   }
 
   Future<bool> _tryOpenCandidate(
@@ -405,14 +506,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
         !uri.hasScheme ||
         !uri.hasAuthority ||
         !['http', 'https'].contains(uri.scheme.toLowerCase())) {
-      setState(() => _errorMessage = 'URL do video invalida.');
+      setState(() => _errorMessage = AppLanguage.text(
+            'URL do vídeo inválida.',
+            'Invalid video URL.',
+          ));
       return false;
     }
 
     _startLoadingTimer(
       total > 1
-          ? 'Abrindo stream ${index + 1}/$total com ${activeRenderer.label}...'
-          : 'Abrindo stream com ${activeRenderer.label}...',
+          ? AppLanguage.text(
+              'Abrindo stream ${index + 1}/$total com ${activeRenderer.label}...',
+              'Opening stream ${index + 1}/$total with ${activeRenderer.label}...',
+            )
+          : AppLanguage.text(
+              'Abrindo stream com ${activeRenderer.label}...',
+              'Opening stream with ${activeRenderer.label}...',
+            ),
     );
     _activeVideoUrl = url;
     _activeRendererLabel = activeRenderer.label;
@@ -434,12 +544,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
         viewType: activeRenderer.viewType,
       );
 
-      _setLoadingStatus('Conectando ao servidor...');
-      await nextController.initialize().timeout(const Duration(seconds: 25));
+      _setLoadingStatus(AppLanguage.text(
+        'Conectando ao servidor...',
+        'Connecting to the server...',
+      ));
+      await nextController.initialize().timeout(const Duration(seconds: 14));
 
       final previous = _controller;
       previous?.removeListener(_onControllerChanged);
       _controller = nextController;
+      _videoPlayerView = RepaintBoundary(child: VideoPlayer(_controller!));
+      _mediaKitVideoView = null;
       _controller!.addListener(_onControllerChanged);
       assignedController = true;
       await previous?.dispose();
@@ -451,10 +566,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await _controller!.seekTo(resumePosition);
       }
 
-      _setLoadingStatus('Iniciando video...');
+      _setLoadingStatus(
+          AppLanguage.text('Iniciando vídeo...', 'Starting video...'));
       await _controller!.play();
       await _seekVideoPlayerAfterStart(resumePosition);
-      final started = await _waitForVideoStart(const Duration(seconds: 12));
+      final started = await _waitForVideoStart(const Duration(seconds: 7));
       if (started) {
         _markPlaybackStarted();
         _startPositionTicker();
@@ -465,7 +581,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _stopActivePlayback();
       if (mounted) {
         setState(() {
-          _errorMessage = 'O video nao iniciou nesta URL.';
+          _errorMessage = AppLanguage.text(
+            'O vídeo não iniciou nesta URL.',
+            'The video did not start from this URL.',
+          );
         });
       }
       return false;
@@ -478,7 +597,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() {
           _errorMessage = _isLiveContent
               ? _playbackFailureMessage(error)
-              : 'Erro ao carregar o video: $error';
+              : '${AppLanguage.text('Erro ao carregar o vídeo', 'Error loading video')}: $error';
         });
       }
       if (!allowMediaKitFallback) {
@@ -522,14 +641,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
         !uri.hasScheme ||
         !uri.hasAuthority ||
         !['http', 'https'].contains(uri.scheme.toLowerCase())) {
-      setState(() => _errorMessage = 'URL do video invalida.');
+      setState(() => _errorMessage = AppLanguage.text(
+            'URL do vídeo inválida.',
+            'Invalid video URL.',
+          ));
       return false;
     }
 
     _startLoadingTimer(
       total > 1
-          ? 'Abrindo stream ${index + 1}/$total com MediaKit...'
-          : 'Abrindo stream com MediaKit...',
+          ? AppLanguage.text(
+              'Abrindo stream ${index + 1}/$total com MediaKit...',
+              'Opening stream ${index + 1}/$total with MediaKit...',
+            )
+          : AppLanguage.text(
+              'Abrindo stream com MediaKit...',
+              'Opening stream with MediaKit...',
+            ),
     );
     _activeVideoUrl = url;
     _activeRendererLabel = 'MediaKit';
@@ -552,9 +680,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final controller = media_kit_video.VideoController(player);
       _mediaKitPlayer = player;
       _mediaKitController = controller;
+      _mediaKitVideoView = RepaintBoundary(
+        child: media_kit_video.Video(controller: controller),
+      );
+      _videoPlayerView = null;
       _bindMediaKitStreams(player);
 
-      _setLoadingStatus('Conectando ao servidor...');
+      _setLoadingStatus(AppLanguage.text(
+        'Conectando ao servidor...',
+        'Connecting to the server...',
+      ));
       await player
           .open(
             media_kit.Media(
@@ -568,7 +703,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ),
             play: false,
           )
-          .timeout(const Duration(seconds: 25));
+          .timeout(const Duration(seconds: 10));
 
       if (resumePosition != null &&
           resumePosition > const Duration(seconds: 3) &&
@@ -576,10 +711,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await player.seek(resumePosition);
       }
 
-      _setLoadingStatus('Iniciando video...');
+      _setLoadingStatus(
+          AppLanguage.text('Iniciando vídeo...', 'Starting video...'));
       await player.play();
       final started = await _waitForMediaKitVideoStart(
-        const Duration(seconds: 18),
+        const Duration(seconds: 10),
       );
       if (started) {
         await _seekMediaKitAfterStart(player, resumePosition);
@@ -593,7 +729,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() {
           _errorMessage = _isLiveContent
               ? 'O canal abriu sem imagem nesta alternativa.'
-              : 'O video nao iniciou com MediaKit.';
+              : AppLanguage.text(
+                  'O vídeo não iniciou com MediaKit.',
+                  'The video did not start with MediaKit.',
+                );
         });
       }
       return false;
@@ -603,7 +742,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() {
           _errorMessage = _isLiveContent
               ? _playbackFailureMessage(error)
-              : 'Erro ao carregar com MediaKit: $error';
+              : '${AppLanguage.text('Erro ao carregar com MediaKit', 'Error loading with MediaKit')}: $error';
         });
       }
       return false;
@@ -722,7 +861,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _lastPosition = value.position;
 
     if (value.hasError) {
-      final error = value.errorDescription ?? 'Erro desconhecido no player.';
+      final error = value.errorDescription ??
+          AppLanguage.text(
+            'Erro desconhecido no player.',
+            'Unknown player error.',
+          );
       if (_hasStartedPlayback && _isRecoverableReadError(error)) {
         _scheduleStreamRecovery(error);
         return;
@@ -804,6 +947,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     _controller = null;
+    _videoPlayerView = null;
     current.removeListener(_onControllerChanged);
     try {
       if (current.value.isInitialized) {
@@ -828,6 +972,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final player = _mediaKitPlayer;
     _mediaKitPlayer = null;
     _mediaKitController = null;
+    _mediaKitVideoView = null;
     _mediaKitDuration = Duration.zero;
     _mediaKitPlaying = false;
     await player?.dispose();
@@ -1064,7 +1209,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (_channelMenuShowingCategories) {
         _closeChannelMenu();
       } else {
+        _channelMenuEpgTimer?.cancel();
         setState(() {
+          _channelMenuEpgRefreshToken++;
           _channelMenuShowingCategories = true;
           _channelMenuFavoriteFocused = false;
         });
@@ -1109,7 +1256,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     if (!_channelMenuShowingCategories) {
+      _channelMenuEpgTimer?.cancel();
       setState(() {
+        _channelMenuEpgRefreshToken++;
         _channelMenuShowingCategories = true;
         _channelMenuFavoriteFocused = false;
       });
@@ -1191,7 +1340,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _closeChannelMenu() {
-    setState(() => _channelMenuVisible = false);
+    _channelMenuEpgTimer?.cancel();
+    setState(() {
+      _channelMenuEpgRefreshToken++;
+      _channelMenuVisible = false;
+    });
     _playerFocusNode.requestFocus();
   }
 
@@ -1203,6 +1356,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         (_focusedLiveChannelIndex + delta).clamp(0, channels.length - 1);
     setState(() => _focusedLiveChannelIndex = nextIndex);
     _scrollFocusedLiveChannelIntoView();
+    _queueChannelMenuEpgRefresh();
   }
 
   void _moveFocusedLiveCategory(int delta) {
@@ -1212,6 +1366,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     final nextIndex =
         (_focusedLiveCategoryIndex + delta).clamp(0, categories.length - 1);
+    if (nextIndex == _focusedLiveCategoryIndex) {
+      return;
+    }
     setState(() => _focusedLiveCategoryIndex = nextIndex);
     _scrollFocusedLiveChannelIntoView();
   }
@@ -1238,6 +1395,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _focusedLiveChannelIndex = activeIndex >= 0 ? activeIndex : 0;
     });
     _scrollFocusedLiveChannelIntoView();
+    _queueChannelMenuEpgRefresh();
   }
 
   int _activeLiveChannelIndex(List<IptvContentItem> channels) {
@@ -1623,54 +1781,109 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _seekBy(Duration delta) async {
-    final mediaPlayer = _mediaKitPlayer;
-    if (mediaPlayer != null) {
-      if (!_canSeek) {
-        return;
-      }
-      final duration = _mediaKitDuration;
-      var target = mediaPlayer.state.position + delta;
-      if (target < Duration.zero) {
-        target = Duration.zero;
-      }
-      if (duration > Duration.zero && target > duration) {
-        target = duration;
-      }
-      await mediaPlayer.seek(target);
-      _scheduleControlsHide();
+    if (!_canSeek) {
       return;
     }
 
-    final controller = _controller;
-    if (controller == null || !_canSeek) {
+    final duration = _playbackDuration;
+    final base = _pendingSeekTarget ?? _playbackPosition;
+    final target = _clampSeekPosition(base + delta, duration);
+    _queueSeek(target);
+  }
+
+  Future<void> _seekTo(Duration position) async {
+    if (!_canSeek) {
       return;
     }
 
-    final duration = controller.value.duration;
-    var target = controller.value.position + delta;
+    _queueSeek(_clampSeekPosition(position, _playbackDuration));
+  }
+
+  Duration get _playbackPosition {
+    return _mediaKitPlayer?.state.position ??
+        _controller?.value.position ??
+        _lastPosition;
+  }
+
+  Duration get _playbackDuration {
+    return _mediaKitPlayer != null
+        ? _mediaKitDuration
+        : _controller?.value.duration ?? Duration.zero;
+  }
+
+  Duration _clampSeekPosition(Duration position, Duration duration) {
+    var target = position;
     if (target < Duration.zero) {
       target = Duration.zero;
     }
     if (duration > Duration.zero && target > duration) {
       target = duration;
     }
-    await controller.seekTo(target);
-    _scheduleControlsHide();
+    if (duration > const Duration(seconds: 3) &&
+        target > duration - const Duration(seconds: 2)) {
+      target = duration - const Duration(seconds: 2);
+    }
+    return target;
   }
 
-  Future<void> _seekTo(Duration position) async {
+  void _queueSeek(Duration target) {
+    _pendingSeekTarget = target;
+    _lastPosition = target;
+    _showControls(autoHide: false);
+    _seekDebounceTimer?.cancel();
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 220), () {
+      unawaited(_flushPendingSeek());
+    });
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _flushPendingSeek() async {
+    if (_seekInProgress) {
+      return;
+    }
+
+    final target = _pendingSeekTarget;
+    if (target == null || !_canSeek) {
+      return;
+    }
+
+    _pendingSeekTarget = null;
+    _seekInProgress = true;
+    try {
+      await _performSeek(target).timeout(const Duration(seconds: 8));
+      _lastPosition = target;
+    } catch (error) {
+      if (mounted && _isRecoverableReadError(error.toString())) {
+        _scheduleStreamRecovery(error.toString());
+      }
+    } finally {
+      _seekInProgress = false;
+      if (_pendingSeekTarget != null) {
+        unawaited(_flushPendingSeek());
+      } else {
+        _scheduleControlsHide();
+      }
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _performSeek(Duration target) async {
     final mediaPlayer = _mediaKitPlayer;
-    if (mediaPlayer != null && _canSeek) {
-      await mediaPlayer.seek(position);
-      _scheduleControlsHide();
+    if (mediaPlayer != null) {
+      await mediaPlayer.seek(target);
       return;
     }
 
     final controller = _controller;
-    if (controller != null && _canSeek) {
-      await controller.seekTo(position);
-      _scheduleControlsHide();
+    if (controller == null) {
+      return;
     }
+
+    await controller.seekTo(target);
   }
 
   _RendererMode get _activeRendererMode {
@@ -1766,10 +1979,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              const Text(
-                'Aguarde, o stream pode levar alguns segundos para iniciar.',
+              Text(
+                AppLanguage.text(
+                  'Aguarde, o stream pode levar alguns segundos para iniciar.',
+                  'Please wait, the stream may take a few seconds to start.',
+                ),
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white60, fontSize: 12),
+                style: const TextStyle(color: Colors.white60, fontSize: 12),
               ),
               const SizedBox(height: 14),
               Text(
@@ -1908,7 +2124,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return ColoredBox(
         color: Colors.black,
         child: SizedBox.expand(
-          child: media_kit_video.Video(controller: mediaKitController),
+          child: _mediaKitVideoView ??
+              RepaintBoundary(
+                child: media_kit_video.Video(controller: mediaKitController),
+              ),
         ),
       );
     }
@@ -1921,7 +2140,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return ColoredBox(
       color: Colors.black,
       child: SizedBox.expand(
-        child: VideoPlayer(controller),
+        child:
+            _videoPlayerView ?? RepaintBoundary(child: VideoPlayer(controller)),
       ),
     );
   }
@@ -1938,8 +2158,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     final padding = tvOverscanPadding(context);
     final title = _channelMenuShowingCategories
-        ? 'Categorias'
-        : selectedCategory?.label ?? 'Canais';
+        ? AppLanguage.text('Categorias', 'Categories')
+        : selectedCategory?.label ?? AppLanguage.text('Canais', 'Channels');
 
     return Container(
       color: const Color(0x33000000),
@@ -2006,10 +2226,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 Expanded(
                   child: _channelMenuShowingCategories
                       ? categories.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
-                                'Nenhuma categoria disponivel.',
-                                style: TextStyle(color: Colors.white70),
+                                AppLanguage.text(
+                                  'Nenhuma categoria disponível.',
+                                  'No category is available.',
+                                ),
+                                style: const TextStyle(color: Colors.white70),
                               ),
                             )
                           : ListView.builder(
@@ -2027,8 +2250,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           ? Center(
                               child: Text(
                                 _selectedLiveCategoryId == _favoritesCategoryId
-                                    ? 'Nenhum canal favorito.'
-                                    : 'Nenhum canal nesta categoria.',
+                                    ? AppLanguage.text(
+                                        'Nenhum canal favorito.',
+                                        'No favorite channels.',
+                                      )
+                                    : AppLanguage.text(
+                                        'Nenhum canal nesta categoria.',
+                                        'No channels in this category.',
+                                      ),
                                 style: const TextStyle(color: Colors.white70),
                               ),
                             )
@@ -2112,7 +2341,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    '$count canais',
+                    '$count ${AppLanguage.text('canais', 'channels')}',
                     style: TextStyle(
                       color: focused ? Colors.white70 : Colors.white54,
                       fontSize: 11,
@@ -2201,7 +2430,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   Text(
                     channel.subtitle.isNotEmpty
                         ? channel.subtitle
-                        : 'Programacao Ao Vivo',
+                        : AppLanguage.text(
+                            'Programação Ao Vivo',
+                            'Live Programming',
+                          ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -2261,6 +2493,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return Image.network(
       url,
       fit: BoxFit.contain,
+      cacheWidth: 192,
       errorBuilder: (_, __, ___) => _buildChannelImageFallback(),
       loadingBuilder: (context, child, loadingProgress) {
         if (loadingProgress == null) {
@@ -2356,7 +2589,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   child: Text(
                     _canSeek
                         ? '${_formatTime(position)} / ${duration > Duration.zero ? _formatTime(duration) : '--:--'}'
-                        : 'Ao vivo - $_activeCategory',
+                        : '${AppLanguage.text('Ao vivo', 'Live')} - $_activeCategory',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -2367,7 +2600,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
                 Text(
-                  'Modo: $_activeRendererLabel',
+                  '${AppLanguage.text('Modo', 'Mode')}: $_activeRendererLabel',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -2640,13 +2873,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
             Text(
               _errorMessage ??
                   snapshotError?.toString() ??
-                  'Erro ao carregar o video.',
+                  AppLanguage.text(
+                    'Erro ao carregar o vídeo.',
+                    'Error loading video.',
+                  ),
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70),
             ),
             const SizedBox(height: 14),
             Text(
-              'Modo: $_activeRendererLabel | URL: $_activeVideoUrl\nPosicao: ${_lastPosition.inSeconds}s',
+              '${AppLanguage.text('Modo', 'Mode')}: $_activeRendererLabel | URL: $_activeVideoUrl\n${AppLanguage.text('Posição', 'Position')}: ${_lastPosition.inSeconds}s',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.center,

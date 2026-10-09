@@ -9,6 +9,7 @@ import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
 import 'api_service.dart';
+import 'app_language.dart';
 
 class EventReminder {
   final String eventId;
@@ -95,9 +96,12 @@ class EventReminder {
 class ReminderService {
   static const String _storageKey = 'game_day_event_reminders';
   static const String _channelId = 'game_day_reminders';
-  static const String _channelName = 'Lembretes de jogos';
-  static const String _channelDescription =
-      'Notificacoes 15 minutos antes dos jogos marcados.';
+  static String get _channelName =>
+      AppLanguage.text('Lembretes de jogos', 'Game reminders');
+  static String get _channelDescription => AppLanguage.text(
+        'Notificacoes 15 minutos antes dos jogos marcados.',
+        'Notifications 15 minutes before selected games.',
+      );
   static const String _notificationIcon = 'ic_launcher_foreground';
 
   static final FlutterLocalNotificationsPlugin _notifications =
@@ -145,7 +149,7 @@ class ReminderService {
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(
-          const AndroidNotificationChannel(
+          AndroidNotificationChannel(
             _channelId,
             _channelName,
             description: _channelDescription,
@@ -208,21 +212,41 @@ class ReminderService {
     await initialize();
     final startDateTime = event.eventStartDateTime;
     if (startDateTime == null) {
-      throw Exception('Horario do evento nao encontrado.');
+      throw Exception(
+        AppLanguage.text(
+          'Horario do evento nao encontrado.',
+          'The event time was not found.',
+        ),
+      );
     }
 
     final scheduledDate = startDateTime.subtract(const Duration(minutes: 15));
     if (!scheduledDate.isAfter(DateTime.now())) {
-      throw Exception('Nao e possivel lembrar jogos que ja comecaram.');
+      throw Exception(
+        AppLanguage.text(
+          'Nao e possivel lembrar jogos que ja comecaram.',
+          'A reminder cannot be set for a game that has already started.',
+        ),
+      );
     }
 
     final permitted = await requestNotificationPermission();
     if (!permitted) {
-      throw Exception('Permissao de notificacao negada.');
+      throw Exception(
+        AppLanguage.text(
+          'Permissao de notificacao negada.',
+          'Notification permission was denied.',
+        ),
+      );
     }
     final exactAlarmPermitted = await _requestExactAlarmPermission();
     if (!exactAlarmPermitted) {
-      throw Exception('Permissao de alarme exato negada.');
+      throw Exception(
+        AppLanguage.text(
+          'Permissao de alarme exato negada.',
+          'Exact alarm permission was denied.',
+        ),
+      );
     }
 
     final reminders = await getActiveReminders();
@@ -243,11 +267,16 @@ class ReminderService {
 
     await _notifications.zonedSchedule(
       id: notificationId,
-      title: 'Seu jogo comeca em 15 minutos',
-      body:
-          '${event.title} comeca as ${_formatTime(startDateTime)}. Toque para assistir.',
+      title: AppLanguage.text(
+        'Seu jogo comeca em 15 minutos',
+        'Your game starts in 15 minutes',
+      ),
+      body: AppLanguage.text(
+        '${event.title} comeca as ${_formatTime(startDateTime)}. Toque para assistir.',
+        '${event.title} starts at ${_formatTime(startDateTime)}. Tap to watch.',
+      ),
       scheduledDate: tz.TZDateTime.from(scheduledDate, tz.local),
-      notificationDetails: const NotificationDetails(
+      notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
           _channelId,
           _channelName,

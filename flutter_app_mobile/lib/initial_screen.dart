@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'device_info.dart';
 import 'api_service.dart';
+import 'authorization_notice.dart';
+import 'app_language.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
@@ -13,7 +15,7 @@ class InitialScreen extends StatefulWidget {
 }
 
 class _InitialScreenState extends State<InitialScreen> {
-  String _deviceId = 'Carregando...';
+  String _deviceId = AppLanguage.text('Carregando...', 'Loading...');
   bool _showNoLicenseInfo = false;
   bool _isLoadingTrial = false;
   String _trialError = '';
@@ -22,6 +24,11 @@ class _InitialScreenState extends State<InitialScreen> {
   void initState() {
     super.initState();
     _loadDeviceId();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        showPendingAuthorizationNotice(context);
+      }
+    });
   }
 
   @override
@@ -65,15 +72,19 @@ class _InitialScreenState extends State<InitialScreen> {
         // Automatically go to login or show success message with code
         setState(() {
           _isLoadingTrial = false;
-          _trialError =
-              'Trial ativado com sucesso! Verifique seu código: ${result['licenseCode']}. Os pagamentos online estão temporariamente indisponíveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licença após o período.';
+          _trialError = AppLanguage.text(
+            'Trial ativado com sucesso! Verifique seu código: ${result['licenseCode']}. Os pagamentos online estão temporariamente indisponíveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licença após o período.',
+            'Trial activated successfully! Your code is: ${result['licenseCode']}. Online payments are temporarily unavailable. Sign up on the website or contact a reseller to activate your license after the trial.',
+          );
         });
       }
     } catch (e) {
       setState(() {
         _isLoadingTrial = false;
-        _trialError =
-            'Falha ao solicitar trial: ${e.toString()}\nOs pagamentos online estão temporariamente indisponíveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licença.';
+        _trialError = AppLanguage.text(
+          'Falha ao solicitar trial: ${e.toString()}\nOs pagamentos online estão temporariamente indisponíveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licença.',
+          'Unable to request a trial: ${e.toString()}\nOnline payments are temporarily unavailable. Sign up on the website or contact a reseller to activate your license.',
+        );
       });
     }
   }
@@ -207,9 +218,12 @@ class _InitialScreenState extends State<InitialScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  const Text(
-                                    'Sem Licença Ativa',
-                                    style: TextStyle(
+                                  Text(
+                                    AppLanguage.text(
+                                      'Sem Licença Ativa',
+                                      'No Active License',
+                                    ),
+                                    style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 24,
                                         fontWeight: FontWeight.bold),
@@ -236,9 +250,12 @@ class _InitialScreenState extends State<InitialScreen> {
                                     ),
                                     child: Column(
                                       children: [
-                                        const Text(
-                                          'Identificador do dispositivo',
-                                          style: TextStyle(
+                                        Text(
+                                          AppLanguage.text(
+                                            'Identificador do dispositivo',
+                                            'Device identifier',
+                                          ),
+                                          style: const TextStyle(
                                               color: Colors.white70,
                                               fontSize: 13),
                                         ),
@@ -269,8 +286,10 @@ class _InitialScreenState extends State<InitialScreen> {
                                             padding: const EdgeInsets.symmetric(
                                                 vertical: 16),
                                           ),
-                                          child: const Text('Voltar',
-                                              style: TextStyle(
+                                          child: Text(
+                                              AppLanguage.text(
+                                                  'Voltar', 'Back'),
+                                              style: const TextStyle(
                                                   color: Colors.white)),
                                         ),
                                       ),
@@ -282,9 +301,12 @@ class _InitialScreenState extends State<InitialScreen> {
                                                 ClipboardData(text: _deviceId));
                                             ScaffoldMessenger.of(context)
                                                 .showSnackBar(
-                                              const SnackBar(
-                                                  content: Text(
-                                                      'Device ID Copiado!')),
+                                              SnackBar(
+                                                content: Text(AppLanguage.text(
+                                                  'Device ID copiado!',
+                                                  'Device ID copied!',
+                                                )),
+                                              ),
                                             );
                                           },
                                           style: ElevatedButton.styleFrom(
@@ -293,8 +315,10 @@ class _InitialScreenState extends State<InitialScreen> {
                                             padding: const EdgeInsets.symmetric(
                                                 vertical: 16),
                                           ),
-                                          child: const Text(
-                                              'Copiar Identificador'),
+                                          child: Text(AppLanguage.text(
+                                            'Copiar Identificador',
+                                            'Copy Identifier',
+                                          )),
                                         ),
                                       ),
                                     ],
@@ -308,10 +332,20 @@ class _InitialScreenState extends State<InitialScreen> {
                               children: [
                                 Expanded(
                                   child: _buildOptionCard(
-                                    title: 'JÁ TENHO LICENÇA',
-                                    subtitle: 'Acessar',
-                                    description: 'Entrar com codigo e senha.',
-                                    buttonText: 'ENTRAR',
+                                    title: AppLanguage.text(
+                                      'JÁ TENHO LICENÇA',
+                                      'I HAVE A LICENSE',
+                                    ),
+                                    subtitle: AppLanguage.text(
+                                      'Acessar',
+                                      'Access',
+                                    ),
+                                    description: AppLanguage.text(
+                                      'Entrar com codigo e senha.',
+                                      'Sign in with code and password.',
+                                    ),
+                                    buttonText:
+                                        AppLanguage.text('ENTRAR', 'SIGN IN'),
                                     color: const Color(0xFF6A00FF),
                                     onTap: _goToLogin,
                                     autofocus: true,
@@ -321,10 +355,17 @@ class _InitialScreenState extends State<InitialScreen> {
                                 SizedBox(width: isCompactHeight ? 10 : 14),
                                 Expanded(
                                   child: _buildOptionCard(
-                                    title: 'NÃO TENHO LICENÇA',
-                                    subtitle: 'Teste',
-                                    description: 'Solicitar acesso de teste.',
-                                    buttonText: 'VER',
+                                    title: AppLanguage.text(
+                                      'NÃO TENHO LICENÇA',
+                                      'I DO NOT HAVE A LICENSE',
+                                    ),
+                                    subtitle:
+                                        AppLanguage.text('Teste', 'Trial'),
+                                    description: AppLanguage.text(
+                                      'Solicitar acesso de teste.',
+                                      'Request trial access.',
+                                    ),
+                                    buttonText: AppLanguage.text('VER', 'VIEW'),
                                     color: Colors.teal,
                                     onTap: _handleNoLicense,
                                     autofocus: false,

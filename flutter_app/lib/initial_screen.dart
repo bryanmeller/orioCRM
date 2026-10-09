@@ -15,8 +15,6 @@ class InitialScreen extends StatefulWidget {
 class _InitialScreenState extends State<InitialScreen> {
   String _deviceId = AppLanguage.text('Carregando...', 'Loading...');
   bool _showNoLicenseInfo = false;
-  bool _isLoadingTrial = false;
-  String _trialError = '';
 
   @override
   void initState() {
@@ -56,35 +54,8 @@ class _InitialScreenState extends State<InitialScreen> {
     setState(() => _deviceId = id);
   }
 
-  Future<void> _handleNoLicense() async {
-    setState(() {
-      _showNoLicenseInfo = true;
-      _isLoadingTrial = true;
-      _trialError = '';
-    });
-
-    try {
-      final info = await DeviceInfoHelper.getDeviceInfoDetails();
-      final result = await ApiService.requestTrial(_deviceId, info);
-      if (result['success']) {
-        // Automatically go to login or show success message with code
-        setState(() {
-          _isLoadingTrial = false;
-          _trialError = AppLanguage.text(
-            'Trial ativado com sucesso! Verifique seu codigo: ${result['licenseCode']}. Os pagamentos online estao temporariamente indisponiveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licenca apos o periodo.',
-            'Trial activated successfully! Your code is: ${result['licenseCode']}. Online payments are temporarily unavailable. Sign up on the website or contact a reseller to activate your license after the trial.',
-          );
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _isLoadingTrial = false;
-        _trialError = AppLanguage.text(
-          'Falha ao solicitar trial: ${e.toString()}\nOs pagamentos online estao temporariamente indisponiveis. Cadastre-se no site ou entre em contato com um revendedor para ativar sua licenca.',
-          'Unable to request a trial: ${e.toString()}\nOnline payments are temporarily unavailable. Sign up on the website or contact a reseller to activate your license.',
-        );
-      });
-    }
+  void _handleNoLicense() {
+    setState(() => _showNoLicenseInfo = true);
   }
 
   @override
@@ -188,8 +159,8 @@ class _InitialScreenState extends State<InitialScreen> {
                                     const SizedBox(height: 12),
                                     Text(
                                       AppLanguage.text(
-                                        'Use o aplicativo com a mesma aparencia do simulador web, sem o painel de controle remoto. Faca login rapidamente e navegue pela TV com foco simplificado.',
-                                        'Use the app with the same look as the web simulator, without the remote-control panel. Sign in quickly and browse on your TV with simple navigation.',
+                                        'Este aplicativo foi desenvolvido para oferecer a melhor experiência em TVs com Android TV e dispositivos compatíveis, como Amazon Fire TV Stick e Chromecast com Google TV. Para usar no celular, utilize a versão para smartphones.',
+                                        'This app was developed to provide the best experience on Android TV televisions and compatible devices, such as Amazon Fire TV Stick and Chromecast with Google TV. To use it on a mobile phone, use the smartphone version.',
                                       ),
                                       style: const TextStyle(
                                         color: Colors.grey,
@@ -247,8 +218,8 @@ class _InitialScreenState extends State<InitialScreen> {
                                 children: [
                                   Text(
                                     AppLanguage.text(
-                                      'Sem Licenca Ativa',
-                                      'No Active License',
+                                      'Adquira sua Licença',
+                                      'Get Your License',
                                     ),
                                     style: const TextStyle(
                                         color: Colors.white,
@@ -257,48 +228,53 @@ class _InitialScreenState extends State<InitialScreen> {
                                     textAlign: TextAlign.center,
                                   ),
                                   const SizedBox(height: 18),
-                                  if (_isLoadingTrial)
-                                    const Center(
-                                        child: CircularProgressIndicator())
-                                  else
-                                    Text(
-                                      _trialError,
-                                      style: const TextStyle(
-                                          color: Colors.tealAccent,
-                                          fontSize: 15),
-                                      textAlign: TextAlign.center,
-                                    ),
-                                  const SizedBox(height: 28),
-                                  Container(
-                                    padding: const EdgeInsets.all(20),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF0C0D12),
-                                      borderRadius: BorderRadius.circular(18),
-                                    ),
-                                    child: Column(
-                                      children: [
-                                        Text(
-                                          AppLanguage.text(
-                                            'Identificador do dispositivo',
-                                            'Device Identifier',
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        child: _buildLicenseOption(
+                                          number: '1',
+                                          icon: Icons.language_rounded,
+                                          title: AppLanguage.text(
+                                            'Adquira sua licença pelo site',
+                                            'Purchase your license online',
                                           ),
-                                          style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 13),
+                                          description:
+                                              'https://orioplayer.com/',
                                         ),
-                                        const SizedBox(height: 10),
-                                        Text(
-                                          _deviceId,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 22,
-                                            letterSpacing: 1.8,
-                                            fontWeight: FontWeight.bold,
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: _buildLicenseOption(
+                                          number: '2',
+                                          icon: Icons.storefront_rounded,
+                                          title: AppLanguage.text(
+                                            'Adquira sua licença com um revendedor',
+                                            'Purchase your license from a reseller',
                                           ),
-                                          textAlign: TextAlign.center,
+                                          description: AppLanguage.text(
+                                            'Entre em contato com um revendedor autorizado.',
+                                            'Contact an authorized reseller.',
+                                          ),
                                         ),
-                                      ],
-                                    ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: _buildLicenseOption(
+                                          number: '3',
+                                          icon: Icons.vpn_key_rounded,
+                                          title: AppLanguage.text(
+                                            'Utilize o código de acesso disponibilizado pelo seu provedor',
+                                            'Use the access code provided by your service provider',
+                                          ),
+                                          description: AppLanguage.text(
+                                            'Depois, selecione Entrar e informe o código recebido.',
+                                            'Then select Sign In and enter the code you received.',
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                   const SizedBox(height: 28),
                                   Row(
@@ -366,7 +342,7 @@ class _InitialScreenState extends State<InitialScreen> {
                                 Expanded(
                                   child: _buildOptionCard(
                                     title: AppLanguage.text(
-                                      'JA TENHO LICENCA',
+                                      'JÁ TENHO LICENÇA',
                                       'I HAVE A LICENSE',
                                     ),
                                     subtitle: AppLanguage.text(
@@ -374,7 +350,7 @@ class _InitialScreenState extends State<InitialScreen> {
                                       'Access the App',
                                     ),
                                     description: AppLanguage.text(
-                                      'Informe seu Codigo, Usuario e Senha para autenticar.',
+                                      'Informe seu Código, Usuário e Senha para autenticar.',
                                       'Enter your Code, Username and Password to sign in.',
                                     ),
                                     buttonText:
@@ -388,16 +364,16 @@ class _InitialScreenState extends State<InitialScreen> {
                                 Expanded(
                                   child: _buildOptionCard(
                                     title: AppLanguage.text(
-                                      'NAO TENHO LICENCA',
+                                      'NÃO TENHO LICENÇA',
                                       "I DON'T HAVE A LICENSE",
                                     ),
                                     subtitle: AppLanguage.text(
-                                      'Adquira sua Licenca',
+                                      'Adquira sua Licença',
                                       'Get Your License',
                                     ),
                                     description: AppLanguage.text(
-                                      'Acesse o teste gratis ou compre uma licenca.',
-                                      'Start a free trial or purchase a license.',
+                                      'Conheca as opcoes disponiveis para obter seu acesso.',
+                                      'See the available options to get access.',
                                     ),
                                     buttonText: AppLanguage.text(
                                       'VER DETALHES',
@@ -417,6 +393,73 @@ class _InitialScreenState extends State<InitialScreen> {
                   ),
                 );
               },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLicenseOption({
+    required String number,
+    required IconData icon,
+    required String title,
+    required String description,
+  }) {
+    return Container(
+      height: 154,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0C0D12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.teal.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  number,
+                  style: const TextStyle(
+                    color: Colors.tealAccent,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              Icon(icon, color: Colors.tealAccent, size: 24),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            title,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              height: 1.2,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            description,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white60,
+              fontSize: 11,
+              height: 1.25,
             ),
           ),
         ],

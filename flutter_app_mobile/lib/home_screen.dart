@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 import 'api_service.dart';
+import 'app_language.dart';
 import 'device_info.dart';
 import 'player_return_guard.dart';
 import 'reminder_service.dart';
@@ -12,23 +13,31 @@ import 'tv_focus.dart';
 import 'tv_safe_area.dart';
 
 enum HomeSection {
-  home('Inicio', Icons.home),
-  live('TV ao Vivo', Icons.live_tv),
-  movies('Filmes', Icons.movie),
-  series('Series', Icons.tv_rounded),
-  favorites('Favoritos', Icons.favorite),
-  settings('Configuracoes', Icons.settings);
+  home('Inicio', 'Home', Icons.home),
+  live('TV ao Vivo', 'Live TV', Icons.live_tv),
+  movies('Filmes', 'Movies', Icons.movie),
+  series('Series', 'Series', Icons.tv_rounded),
+  favorites('Favoritos', 'Favorites', Icons.favorite),
+  settings('Configuracoes', 'Settings', Icons.settings);
 
-  final String label;
+  final String portugueseLabel;
+  final String englishLabel;
   final IconData icon;
 
-  const HomeSection(this.label, this.icon);
+  const HomeSection(this.portugueseLabel, this.englishLabel, this.icon);
+
+  String get label => AppLanguage.text(portugueseLabel, englishLabel);
 }
 
 class HomeScreen extends StatefulWidget {
   final String? initialReminderEventId;
+  final bool skipInitialSessionRevalidation;
 
-  const HomeScreen({super.key, this.initialReminderEventId});
+  const HomeScreen({
+    super.key,
+    this.initialReminderEventId,
+    this.skipInitialSessionRevalidation = false,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -36,7 +45,9 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   HomeSection _activeSection = HomeSection.home;
-  String _serverName = 'Carregando...';
+  String _serverName = AppLanguage.text('Carregando...', 'Loading...');
+  String _licenseExpirationLabel = '';
+  bool _licenseExpirationUrgent = false;
   String? _errorMessage;
   bool _loading = true;
   String _selectedCategory = 'todos';
@@ -55,6 +66,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   IptvCatalog _liveCatalog = const IptvCatalog(categories: [], items: []);
   IptvCatalog _movieCatalog = const IptvCatalog(categories: [], items: []);
   IptvCatalog _seriesCatalog = const IptvCatalog(categories: [], items: []);
+  IptvCatalog? _visibleLiveCatalogCache;
+  IptvCatalog? _visibleLiveCatalogSource;
+  IptvCatalog? _visibleMovieCatalogCache;
+  IptvCatalog? _visibleMovieCatalogSource;
   List<ContinueWatchingItem> _continueWatchingItems = const [];
   final Set<String> _favorites = {};
   DateTime? _lastHomeBackPress;
@@ -69,6 +84,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _homeLoadToken = 0;
   final Set<String> _liveEpgLoadingIds = {};
   Timer? _liveEpgFocusTimer;
+  Timer? _liveEpgRetryTimer;
+  Duration _liveEpgRetryDelay = const Duration(minutes: 1);
+  bool _backgroundEpgRefreshing = false;
 
   @override
   void initState() {
@@ -79,7 +97,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     };
     _searchFocusNode.addListener(_handleSearchFocusChange);
     _pendingReminderEventId = widget.initialReminderEventId;
-    _loadHome();
+    _loadHome(
+      revalidateWithServer: !widget.skipInitialSessionRevalidation,
+    );
   }
 
   @override
@@ -93,6 +113,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _logoutAccountFocusNode.dispose();
     _refreshFocusNode.dispose();
     _liveEpgFocusTimer?.cancel();
+    _liveEpgRetryTimer?.cancel();
     for (final node in _sidebarFocusNodes.values) {
       node.dispose();
     }
@@ -113,7 +134,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(_validateActiveSessionOrExit());
+      unawaited(_refreshEpgAfterSessionValidation());
+    }
+  }
+
+  Future<void> _refreshEpgAfterSessionValidation() async {
+    final valid = await _validateActiveSessionOrExit();
+    if (valid && mounted && !_loading) {
+      final previousServer = await ApiService.getActiveServer();
+      try {
+        final deviceId = await DeviceInfoHelper.getDeviceId();
+        final refreshed = await ApiService.refreshSavedSession(
+          deviceId: deviceId,
+          logoutOnRevoked: false,
+          minInterval: const Duration(minutes: 1),
+        );
+        final currentServer = await ApiService.getActiveServer();
+        if (refreshed &&
+            (previousServer?.id != currentServer?.id ||
+                previousServer?.cleanBaseUrl != currentServer?.cleanBaseUrl)) {
+          if (mounted) {
+            await _loadHome();
+          }
+          return;
+        }
+        if (refreshed) {
+          await _refreshLicenseExpirationLabel();
+        }
+      } catch (_) {
+        // Keep the current catalog when the refresh service is offline.
+      }
+      await _refreshLiveEpgCacheInBackground();
     }
   }
 
@@ -126,9 +177,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _loadHome({bool refreshServersFirst = false}) async {
+  Future<void> _loadHome({
+    bool refreshServersFirst = false,
+    bool revalidateWithServer = true,
+  }) async {
     final loadToken = ++_homeLoadToken;
     _liveEpgRefreshToken++;
+    _liveEpgRetryTimer?.cancel();
     setState(() {
       _loading = true;
       _errorMessage = null;
@@ -136,7 +191,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     try {
       final sessionValid = await _validateActiveSessionOrExit(
-        revalidateWithServer: !refreshServersFirst,
+        revalidateWithServer: revalidateWithServer && !refreshServersFirst,
       );
       if (!sessionValid || !mounted) {
         return;
@@ -148,8 +203,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final continueWatching = await ApiService.getContinueWatchingItems();
       final adultContentBlocked = await ApiService.isAdultContentBlocked();
       final activeReminders = await ReminderService.getActiveReminders();
-      final savedServerName =
-          prefs.getString('selected_server_name') ?? 'Servidor Desconhecido';
+      final savedServerName = prefs.getString('selected_server_name') ??
+          AppLanguage.text('Servidor Desconhecido', 'Unknown Server');
 
       if (mounted && loadToken == _homeLoadToken) {
         setState(() => _serverName = savedServerName);
@@ -159,16 +214,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         deviceId: deviceId,
         refreshServersFirst: refreshServersFirst,
       );
+      final licenseDisplayInfo = await ApiService.getSavedLicenseDisplayInfo();
 
       if (!mounted || loadToken != _homeLoadToken) {
         return;
       }
 
+      final visibleLive = adultContentBlocked
+          ? _withoutAdultCategories(catalogs.live)
+          : catalogs.live;
+      final visibleMovies = adultContentBlocked
+          ? _withoutAdultCategories(catalogs.movies)
+          : catalogs.movies;
+      final licenseExpirationDisplay =
+          licenseDisplayInfo.accountType == 'PROVIDER'
+              ? (label: '', urgent: false)
+              : _formatLicenseExpiration(
+                  licenseDisplayInfo.expiresAt,
+                  licenseDisplayInfo.preferredLanguage,
+                );
       setState(() {
         _serverName = catalogs.server.name;
+        _licenseExpirationLabel = licenseExpirationDisplay.label;
+        _licenseExpirationUrgent = licenseExpirationDisplay.urgent;
         _liveCatalog = catalogs.live;
         _movieCatalog = catalogs.movies;
         _seriesCatalog = catalogs.series;
+        _visibleLiveCatalogSource = adultContentBlocked ? catalogs.live : null;
+        _visibleLiveCatalogCache = adultContentBlocked ? visibleLive : null;
+        _visibleMovieCatalogSource =
+            adultContentBlocked ? catalogs.movies : null;
+        _visibleMovieCatalogCache = adultContentBlocked ? visibleMovies : null;
         _continueWatchingItems = continueWatching;
         _adultContentBlocked = adultContentBlocked;
         _favorites
@@ -187,7 +263,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       _openPendingReminderIfNeeded();
       _queueVisibleLiveEpgRefresh();
-      unawaited(_refreshLiveEpgCacheInBackground());
+      unawaited(_refreshHomeEpgPreviewThenCache());
     } catch (error) {
       if (!mounted || loadToken != _homeLoadToken) {
         return;
@@ -215,24 +291,93 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return items.isNotEmpty ? items.first : null;
   }
 
-  Future<void> _refreshLiveEpgCacheInBackground() async {
+  Future<void> _refreshHomeEpgPreviewThenCache() async {
     final token = _liveEpgRefreshToken;
+    if (_activeSection == HomeSection.home) {
+      final seen = <String>{};
+      final candidates = [
+        ..._gamesOfTheDayItems.take(4),
+        ..._favoriteHomeItems.where((item) => item.type == 'live').take(4),
+        ..._visibleLiveCatalog.items.take(8),
+      ]
+          .where((item) =>
+              item.type == 'live' && !item.liveEpgChecked && seen.add(item.id))
+          .toList();
+      if (candidates.isNotEmpty) {
+        try {
+          final updated = await ApiService.fetchLiveEpgItems(
+            candidates,
+            useXtreamFallback: false,
+          );
+          if (mounted && token == _liveEpgRefreshToken && updated.isNotEmpty) {
+            _replaceLiveCatalogItems(updated);
+          }
+        } catch (_) {
+          // The full refresh below can retry without hiding existing EPG.
+        }
+      }
+    }
+    if (mounted && token == _liveEpgRefreshToken) {
+      await _refreshLiveEpgCacheInBackground();
+    }
+  }
+
+  Future<void> _refreshLiveEpgCacheInBackground() async {
+    if (_backgroundEpgRefreshing) {
+      return;
+    }
+    _backgroundEpgRefreshing = true;
+    final token = _liveEpgRefreshToken;
+    final stopwatch = Stopwatch()..start();
     final items = _liveCatalog.items
         .where((item) => item.type == 'live')
         .toList(growable: false);
     if (items.isEmpty) {
+      _backgroundEpgRefreshing = false;
       return;
     }
 
     try {
-      final updatedItems = await ApiService.refreshLiveEpgCache(items);
-      if (!mounted || token != _liveEpgRefreshToken || updatedItems.isEmpty) {
+      final refresh = await ApiService.refreshLiveEpgCache(items);
+      if (!refresh.success) {
+        _scheduleLiveEpgRetry();
+      } else {
+        _liveEpgRetryTimer?.cancel();
+        _liveEpgRetryDelay = const Duration(minutes: 1);
+      }
+      if (!mounted || token != _liveEpgRefreshToken || refresh.items.isEmpty) {
         return;
       }
-      _replaceLiveCatalogItems(updatedItems);
+      _replaceLiveCatalogItems(refresh.items);
+      if (ApiService.epgDiagnosticsEnabled) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          debugPrint(
+            'EPG background channels=${items.length} '
+            'visibleMs=${stopwatch.elapsedMilliseconds}',
+          );
+        });
+      }
     } catch (_) {
-      // Cache refresh is opportunistic; visible/on-focus EPG still handles UI.
+      _scheduleLiveEpgRetry();
+    } finally {
+      _backgroundEpgRefreshing = false;
     }
+  }
+
+  void _scheduleLiveEpgRetry() {
+    if (!mounted) {
+      return;
+    }
+    _liveEpgRetryTimer?.cancel();
+    final delay = _liveEpgRetryDelay;
+    _liveEpgRetryDelay = Duration(
+      minutes: (_liveEpgRetryDelay.inMinutes * 2).clamp(1, 16),
+    );
+    _liveEpgRetryTimer = Timer(delay, () {
+      if (mounted) {
+        unawaited(_refreshLiveEpgCacheInBackground());
+      }
+    });
   }
 
   Future<bool> _validateActiveSessionOrExit({
@@ -247,23 +392,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return valid;
     }
 
-    Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
+    Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
     return false;
   }
 
   void _queueVisibleLiveEpgRefresh() {
-    _queueSelectedLiveEpgRefresh();
-  }
-
-  void _queueSelectedLiveEpgRefresh() {
-    final item = _selectedItem;
     if (_activeSection != HomeSection.live) {
       return;
     }
-    if (item == null) {
-      return;
-    }
-    _queueLiveEpgRefreshForItem(item);
+    _liveEpgFocusTimer?.cancel();
+    _liveEpgFocusTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted || _activeSection != HomeSection.live) {
+        return;
+      }
+      unawaited(_refreshVisibleLiveEpgItems());
+    });
+  }
+
+  void _resetLiveEpgRefreshState() {
+    _liveEpgRefreshToken++;
+    _liveEpgLoadingIds.clear();
+    _liveEpgFocusTimer?.cancel();
   }
 
   void _queueLiveEpgRefreshForItem(IptvContentItem item) {
@@ -276,6 +425,54 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _refreshVisibleLiveEpgItems() async {
+    final items = _liveEpgRefreshCandidates()
+        .where((item) =>
+            item.type == 'live' &&
+            !item.liveEpgChecked &&
+            !_liveEpgLoadingIds.contains(item.id))
+        .take(16)
+        .toList();
+    if (items.isEmpty) {
+      return;
+    }
+
+    final token = _liveEpgRefreshToken;
+    final stopwatch = Stopwatch()..start();
+    _liveEpgLoadingIds.addAll(items.map((item) => item.id));
+    try {
+      final updatedItems = await ApiService.fetchLiveEpgItems(
+        items,
+        useXtreamFallback: true,
+      );
+      if (!mounted ||
+          token != _liveEpgRefreshToken ||
+          _activeSection != HomeSection.live) {
+        return;
+      }
+
+      if (updatedItems.isNotEmpty) {
+        _replaceLiveCatalogItems(updatedItems);
+        if (ApiService.epgDiagnosticsEnabled) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            debugPrint(
+              'EPG visible channels=${items.length} '
+              'visibleMs=${stopwatch.elapsedMilliseconds}',
+            );
+          });
+        }
+      }
+    } catch (_) {
+      if (ApiService.epgDiagnosticsEnabled) {
+        debugPrint('EPG visible refresh failed');
+      }
+    } finally {
+      for (final item in items) {
+        _liveEpgLoadingIds.remove(item.id);
+      }
+    }
+  }
+
   Future<void> _refreshLiveEpgForItem(IptvContentItem item) async {
     if (item.type != 'live' ||
         item.liveEpgChecked ||
@@ -284,19 +481,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     final token = _liveEpgRefreshToken;
+    final stopwatch = Stopwatch()..start();
     _liveEpgLoadingIds.add(item.id);
     try {
-      final updatedItems = await ApiService.fetchLiveEpgItems([item]);
+      final updatedItems = await ApiService.fetchLiveEpgItems(
+        [item],
+        useXtreamFallback: true,
+      );
       if (!mounted ||
           token != _liveEpgRefreshToken ||
-          _activeSection != HomeSection.live ||
-          updatedItems.isEmpty) {
+          _activeSection != HomeSection.live) {
         return;
       }
 
-      _replaceLiveCatalogItem(updatedItems.first);
+      if (updatedItems.isNotEmpty) {
+        _replaceLiveCatalogItem(updatedItems.first);
+        if (ApiService.epgDiagnosticsEnabled) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            debugPrint(
+              'EPG focused visibleMs=${stopwatch.elapsedMilliseconds}',
+            );
+          });
+        }
+      }
     } catch (_) {
-      return;
+      if (ApiService.epgDiagnosticsEnabled) {
+        debugPrint('EPG focused refresh failed');
+      }
     } finally {
       _liveEpgLoadingIds.remove(item.id);
     }
@@ -333,6 +544,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
+  List<IptvContentItem> _liveEpgRefreshCandidates() {
+    final filteredItems = _filteredItems;
+    if (filteredItems.isEmpty) {
+      return const [];
+    }
+
+    final selectedIndex = _selectedItem == null
+        ? -1
+        : filteredItems.indexWhere((item) => item.id == _selectedItem!.id);
+    final start = selectedIndex > 4 ? selectedIndex - 4 : 0;
+    final end = (start + 16).clamp(0, filteredItems.length);
+    return filteredItems.sublist(start, end);
+  }
+
   void _openPendingReminderIfNeeded() {
     final eventId = _pendingReminderEventId;
     if (eventId == null || eventId.isEmpty) {
@@ -366,12 +591,117 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _friendlyError(Object error) {
     final message = error.toString().replaceAll('Exception: ', '');
     if (message.contains('TimeoutException')) {
-      return 'Tempo limite ao consultar o servidor. Tente novamente ou troque de servidor.';
+      return AppLanguage.text(
+        'Tempo limite ao consultar o servidor. Tente novamente ou troque de servidor.',
+        'The server request timed out. Try again or switch servers.',
+      );
     }
     return message;
   }
 
+  ({String label, bool urgent}) _formatLicenseExpiration(
+    DateTime? expiresAt,
+    String language,
+  ) {
+    if (expiresAt == null) {
+      return (label: '', urgent: false);
+    }
+    final localDate = expiresAt.toLocal();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final expirationDate =
+        DateTime(localDate.year, localDate.month, localDate.day);
+    final daysUntilExpiration = expirationDate.difference(today).inDays;
+
+    if (daysUntilExpiration <= 3) {
+      if (daysUntilExpiration < 0) {
+        return (
+          label: language == 'en' ? 'License expired' : 'Licenca expirada',
+          urgent: true,
+        );
+      }
+      if (daysUntilExpiration == 0) {
+        return (
+          label: language == 'en' ? 'Expires today' : 'Vence hoje',
+          urgent: true,
+        );
+      }
+      if (daysUntilExpiration == 1) {
+        return (
+          label: language == 'en'
+              ? 'One day until expiration'
+              : 'Faltando um dia para vencer',
+          urgent: true,
+        );
+      }
+      return (
+        label: language == 'en'
+            ? '$daysUntilExpiration days until expiration'
+            : '$daysUntilExpiration Dias para Vencer',
+        urgent: true,
+      );
+    }
+
+    final day = localDate.day.toString().padLeft(2, '0');
+    final month = localDate.month.toString().padLeft(2, '0');
+    final year = localDate.year.toString();
+    return (
+      label: language == 'en' ? '$month/$day/$year' : '$day/$month/$year',
+      urgent: false,
+    );
+  }
+
+  Future<void> _refreshLicenseExpirationLabel() async {
+    final info = await ApiService.getSavedLicenseDisplayInfo();
+    if (!mounted) {
+      return;
+    }
+    final display = info.accountType == 'PROVIDER'
+        ? (label: '', urgent: false)
+        : _formatLicenseExpiration(
+            info.expiresAt,
+            info.preferredLanguage,
+          );
+    if (display.label != _licenseExpirationLabel ||
+        display.urgent != _licenseExpirationUrgent) {
+      setState(() {
+        _licenseExpirationLabel = display.label;
+        _licenseExpirationUrgent = display.urgent;
+      });
+    }
+  }
+
   Future<void> _handleLogout() async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF101216),
+        title: Text(AppLanguage.text('Sair da conta?', 'Sign out?')),
+        content: Text(
+          AppLanguage.text(
+            'Tem certeza que deseja sair da sua conta?',
+            'Are you sure you want to sign out of your account?',
+          ),
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(AppLanguage.text('Cancelar', 'Cancel')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(AppLanguage.text('Sair', 'Sign Out')),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout != true || !mounted) {
+      return;
+    }
+
     await ApiService.logout();
     if (!mounted) {
       return;
@@ -380,16 +710,32 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _handleChangeServer() async {
+    final previousServer = await ApiService.getActiveServer();
+    var listRefreshed = false;
+    try {
+      final deviceId = await DeviceInfoHelper.getDeviceId();
+      listRefreshed = await ApiService.refreshSavedSession(
+        deviceId: deviceId,
+        logoutOnRevoked: false,
+      );
+    } catch (_) {
+      // Still allow choosing from the last saved server list.
+    }
     final servers = await ApiService.getSavedServers();
     if (!mounted) {
       return;
     }
 
-    if (servers.length <= 1) {
+    if (servers.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Nao ha outro servidor salvo para selecionar.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(
+            AppLanguage.text(
+              'Nenhum servidor autorizado disponivel no momento.',
+              'No authorized server is currently available.',
+            ),
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -406,7 +752,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (context) {
         return AlertDialog(
           backgroundColor: const Color(0xFF101216),
-          title: const Text('Trocar servidor'),
+          title: Text(
+            listRefreshed
+                ? AppLanguage.text(
+                    'Servidores disponiveis',
+                    'Available servers',
+                  )
+                : AppLanguage.text(
+                    'Servidores salvos (lista pode estar desatualizada)',
+                    'Saved servers (the list may be outdated)',
+                  ),
+          ),
           content: SizedBox(
             width: 520,
             height: (servers.length * 58.0).clamp(120.0, 320.0),
@@ -465,9 +821,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ),
           actions: [
+            if (servers.length == 1)
+              Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: Text(
+                  AppLanguage.text(
+                    'Somente este servidor foi autorizado.',
+                    'Only this server has been authorized.',
+                  ),
+                ),
+              ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancelar'),
+              child: Text(AppLanguage.text('Cancelar', 'Cancel')),
             ),
           ],
         );
@@ -475,6 +841,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
 
     if (selectedServer == null || !mounted) {
+      final currentServer = await ApiService.getActiveServer();
+      if (mounted &&
+          (previousServer?.id != currentServer?.id ||
+              previousServer?.cleanBaseUrl != currentServer?.cleanBaseUrl)) {
+        await _loadHome();
+      }
       return;
     }
 
@@ -494,7 +866,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _seriesCatalog = const IptvCatalog(categories: [], items: []);
       _continueWatchingItems = const [];
     });
-    await _loadHome(refreshServersFirst: true);
+    await _loadHome();
   }
 
   Future<void> _confirmExitApp() async {
@@ -504,13 +876,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (context) {
         return AlertDialog(
           backgroundColor: const Color(0xFF101216),
-          title: const Text('Fechar aplicativo?'),
-          content: const Text('Tem certeza que deseja fechar o Orio Player?'),
+          title: Text(AppLanguage.text('Fechar aplicativo?', 'Close the app?')),
+          content: Text(AppLanguage.text(
+            'Tem certeza que deseja fechar o Orio Player?',
+            'Are you sure you want to close Orio Player?',
+          )),
           actions: [
             TextButton(
               autofocus: true,
               onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Nao'),
+              child: Text(AppLanguage.text('Não', 'No')),
             ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(true),
@@ -543,9 +918,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         now.difference(lastPress) > const Duration(seconds: 2)) {
       _lastHomeBackPress = now;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Pressione voltar novamente para fechar.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(AppLanguage.text(
+            'Pressione voltar novamente para fechar.',
+            'Press back again to close.',
+          )),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -571,7 +949,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ..._seriesCatalog.items,
         ].where((item) => _favorites.contains(item.id)).toList();
         return IptvCatalog(
-          categories: const [CategoryOption(id: 'todos', label: 'Favoritos')],
+          categories: [
+            CategoryOption(
+              id: 'todos',
+              label: AppLanguage.text('Favoritos', 'Favorites'),
+            ),
+          ],
           items: items,
         );
       case HomeSection.home:
@@ -581,15 +964,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   IptvCatalog get _visibleLiveCatalog {
-    return _adultContentBlocked
-        ? _withoutAdultCategories(_liveCatalog)
-        : _liveCatalog;
+    if (!_adultContentBlocked) {
+      return _liveCatalog;
+    }
+    if (!identical(_visibleLiveCatalogSource, _liveCatalog) ||
+        _visibleLiveCatalogCache == null) {
+      _visibleLiveCatalogSource = _liveCatalog;
+      _visibleLiveCatalogCache = _withoutAdultCategories(_liveCatalog);
+    }
+    return _visibleLiveCatalogCache!;
   }
 
   IptvCatalog get _visibleMovieCatalog {
-    return _adultContentBlocked
-        ? _withoutAdultCategories(_movieCatalog)
-        : _movieCatalog;
+    if (!_adultContentBlocked) {
+      return _movieCatalog;
+    }
+    if (!identical(_visibleMovieCatalogSource, _movieCatalog) ||
+        _visibleMovieCatalogCache == null) {
+      _visibleMovieCatalogSource = _movieCatalog;
+      _visibleMovieCatalogCache = _withoutAdultCategories(_movieCatalog);
+    }
+    return _visibleMovieCatalogCache!;
   }
 
   IptvCatalog _withoutAdultCategories(IptvCatalog catalog) {
@@ -618,6 +1013,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _selectSection(HomeSection section) {
+    final leavingLiveSection =
+        _activeSection == HomeSection.live && section != HomeSection.live;
+    if (leavingLiveSection) {
+      _resetLiveEpgRefreshState();
+    }
+
     setState(() {
       _activeSection = section;
       _sidebarExpanded = false;
@@ -628,10 +1029,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _selectedItem = catalog.items.isNotEmpty ? catalog.items.first : null;
     });
 
+    if (_loading) {
+      _searchFocusNode.unfocus();
+      return;
+    }
+
     _focusFirstSelectedSectionItem(section);
     if (section == HomeSection.live) {
       _queueVisibleLiveEpgRefresh();
-    } else {
+    } else if (!leavingLiveSection) {
       _liveEpgRefreshToken++;
       _liveEpgLoadingIds.clear();
       _liveEpgFocusTimer?.cancel();
@@ -833,6 +1239,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _selectCategory(String categoryId) {
+    if (_activeSection == HomeSection.live) {
+      _resetLiveEpgRefreshState();
+    }
     setState(() {
       _selectedCategory = categoryId;
       final filteredItems = _filteredItems;
@@ -842,6 +1251,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _applySearch(String value) {
+    if (_activeSection == HomeSection.live) {
+      _resetLiveEpgRefreshState();
+    }
     setState(() {
       _searchQuery = value.trim();
       final items = _filteredItems;
@@ -947,9 +1359,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
         setState(() => _activeReminderIds.remove(item.id));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Lembrete removido.'),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            content: Text(AppLanguage.text(
+              'Lembrete removido.',
+              'Reminder removed.',
+            )),
+            duration: const Duration(seconds: 2),
           ),
         );
         return;
@@ -957,9 +1372,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       if (!_canScheduleReminder(item)) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Nao e possivel criar lembrete para este evento.'),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            content: Text(AppLanguage.text(
+              'Não é possível criar lembrete para este evento.',
+              'A reminder cannot be created for this event.',
+            )),
+            duration: const Duration(seconds: 2),
           ),
         );
         return;
@@ -971,9 +1389,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       setState(() => _activeReminderIds.add(item.id));
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Lembrete ativado para 15 minutos antes do evento.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(AppLanguage.text(
+            'Lembrete ativado para 15 minutos antes do evento.',
+            'Reminder set for 15 minutes before the event.',
+          )),
+          duration: const Duration(seconds: 2),
         ),
       );
     } catch (error) {
@@ -1011,19 +1432,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF101216),
-        title: const Text('Continuar assistindo?'),
+        title: Text(AppLanguage.text(
+          'Continuar assistindo?',
+          'Continue watching?',
+        )),
         content: Text(
-          'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+          AppLanguage.text(
+            'Você parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+            'You stopped at ${_formatResumeTime(position)}. Continue where you left off?',
+          ),
         ),
         actions: [
           TextButton(
             autofocus: true,
             onPressed: () => Navigator.of(context).pop(position),
-            child: const Text('Continuar'),
+            child: Text(AppLanguage.text('Continuar', 'Continue')),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(Duration.zero),
-            child: const Text('Ver do inicio'),
+            child: Text(AppLanguage.text('Ver do início', 'Start over')),
           ),
         ],
       ),
@@ -1057,7 +1484,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             void submit() {
               if (!RegExp(r'^\d{4}$').hasMatch(pin)) {
                 setDialogState(() {
-                  errorText = 'Digite uma senha de 4 digitos.';
+                  errorText = AppLanguage.text(
+                    'Digite uma senha de 4 dígitos.',
+                    'Enter a 4-digit PIN.',
+                  );
                 });
                 return;
               }
@@ -1177,7 +1607,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancelar'),
+                  child: Text(AppLanguage.text('Cancelar', 'Cancel')),
                 ),
                 TextButton(
                   autofocus: true,
@@ -1194,8 +1624,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<bool> _confirmParentalPin(String action) async {
     final pin = await _showPinDialog(
-      title: 'Controle parental',
-      hint: 'Senha de 4 digitos',
+      title: AppLanguage.text('Controle parental', 'Parental Controls'),
+      hint: AppLanguage.text('Senha de 4 dígitos', '4-digit PIN'),
       message: action,
     );
     if (pin == null) {
@@ -1208,9 +1638,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     if (!valid) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Senha do controle parental incorreta.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(AppLanguage.text(
+            'Senha do controle parental incorreta.',
+            'Incorrect parental control PIN.',
+          )),
+          duration: const Duration(seconds: 2),
         ),
       );
     }
@@ -1221,8 +1654,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final nextBlocked = !_adultContentBlocked;
     final valid = await _confirmParentalPin(
       nextBlocked
-          ? 'Digite a senha para bloquear categorias XXX.'
-          : 'Digite a senha para liberar categorias XXX.',
+          ? AppLanguage.text(
+              'Digite a senha para bloquear categorias XXX.',
+              'Enter the PIN to block XXX categories.',
+            )
+          : AppLanguage.text(
+              'Digite a senha para liberar categorias XXX.',
+              'Enter the PIN to allow XXX categories.',
+            ),
     );
     if (!valid || !mounted) {
       return;
@@ -1242,8 +1681,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       SnackBar(
         content: Text(
           nextBlocked
-              ? 'Categorias XXX bloqueadas.'
-              : 'Categorias XXX liberadas.',
+              ? AppLanguage.text(
+                  'Categorias XXX bloqueadas.',
+                  'XXX categories blocked.',
+                )
+              : AppLanguage.text(
+                  'Categorias XXX liberadas.',
+                  'XXX categories allowed.',
+                ),
         ),
         duration: const Duration(seconds: 2),
       ),
@@ -1252,23 +1697,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _changeParentalPin() async {
     final valid = await _confirmParentalPin(
-      'Digite a senha atual. A senha inicial e 1234.',
+      AppLanguage.text(
+        'Digite a senha atual. A senha inicial é 1234.',
+        'Enter the current PIN. The initial PIN is 1234.',
+      ),
     );
     if (!valid || !mounted) {
       return;
     }
 
     final newPin = await _showPinDialog(
-      title: 'Nova senha',
-      hint: 'Nova senha de 4 digitos',
+      title: AppLanguage.text('Nova senha', 'New PIN'),
+      hint: AppLanguage.text('Nova senha de 4 dígitos', 'New 4-digit PIN'),
     );
     if (newPin == null || !mounted) {
       return;
     }
 
     final confirmationPin = await _showPinDialog(
-      title: 'Confirmar senha',
-      hint: 'Repita a senha',
+      title: AppLanguage.text('Confirmar senha', 'Confirm PIN'),
+      hint: AppLanguage.text('Repita a senha', 'Enter the PIN again'),
     );
     if (confirmationPin == null || !mounted) {
       return;
@@ -1276,9 +1724,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (newPin != confirmationPin) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('As senhas digitadas nao conferem.'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text(AppLanguage.text(
+            'As senhas digitadas não conferem.',
+            'The PINs do not match.',
+          )),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
@@ -1289,9 +1740,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Senha do controle parental alterada.'),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: Text(AppLanguage.text(
+          'Senha do controle parental alterada.',
+          'Parental control PIN changed.',
+        )),
+        duration: const Duration(seconds: 2),
       ),
     );
   }
@@ -1303,6 +1757,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _liveEpgFocusTimer?.cancel();
       if (item.type == 'series') {
         Navigator.of(context).pushNamed('/series', arguments: item);
+        return;
+      }
+
+      if (item.type == 'movie') {
+        await Navigator.of(context).pushNamed(
+          '/movie',
+          arguments: {
+            'movie': item,
+            'movies': _visibleMovieCatalog.items,
+          },
+        );
+        if (mounted) {
+          final prefs = await SharedPreferences.getInstance();
+          final savedFavorites = prefs.getStringList('favorites') ?? [];
+          final continueWatching = await ApiService.getContinueWatchingItems();
+          setState(() {
+            _favorites
+              ..clear()
+              ..addAll(savedFavorites);
+            _continueWatchingItems = continueWatching;
+          });
+        }
         return;
       }
 
@@ -1573,10 +2049,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildTopBar() {
-    final canSearch = _activeSection == HomeSection.live ||
-        _activeSection == HomeSection.movies ||
-        _activeSection == HomeSection.series ||
-        _activeSection == HomeSection.favorites;
+    final canSearch = !_loading &&
+        (_activeSection == HomeSection.live ||
+            _activeSection == HomeSection.movies ||
+            _activeSection == HomeSection.series ||
+            _activeSection == HomeSection.favorites);
 
     return Container(
       height: 70,
@@ -1602,11 +2079,39 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text(
-                  'Servidor: $_serverName',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                Row(
+                  children: [
+                    if (_licenseExpirationLabel.isNotEmpty) ...[
+                      Text(
+                        'License App: $_licenseExpirationLabel',
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: _licenseExpirationUrgent
+                              ? Colors.redAccent
+                              : const Color(0xFFB8A0FF),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        '•',
+                        style: TextStyle(color: Colors.white24, fontSize: 9),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    Expanded(
+                      child: Text(
+                        '${AppLanguage.text('Servidor', 'Server')}: $_serverName',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1640,7 +2145,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               const SizedBox(width: 8),
               _buildFocusButton(
                 icon: Icons.exit_to_app,
-                label: 'Sair',
+                label: AppLanguage.text('Sair', 'Exit'),
                 onPressed: _confirmExitApp,
                 compact: true,
               ),
@@ -1696,11 +2201,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _buildFavoritesSection(favoriteItems),
           ],
           const SizedBox(height: 22),
-          _buildSectionHeader('TV ao Vivo', HomeSection.live),
+          _buildSectionHeader(
+            AppLanguage.text('TV ao Vivo', 'Live TV'),
+            HomeSection.live,
+          ),
           const SizedBox(height: 12),
           _buildHorizontalRail(livePreview, compact: true),
           const SizedBox(height: 24),
-          _buildSectionHeader('Filmes em Destaque', HomeSection.movies),
+          _buildSectionHeader(
+            AppLanguage.text('Filmes em Destaque', 'Featured Movies'),
+            HomeSection.movies,
+          ),
           const SizedBox(height: 12),
           _buildHorizontalRail(moviesPreview),
           if (_errorMessage != null) ...[
@@ -1740,9 +2251,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               baseColor: const Color(0xFF101216),
               radius: 12,
             ),
-            child: const Text(
-              'Ver tudo',
-              style: TextStyle(
+            child: Text(
+              AppLanguage.text('Ver tudo', 'View all'),
+              style: const TextStyle(
                 color: Color(0xFFD8C6FF),
                 fontWeight: FontWeight.bold,
               ),
@@ -1759,9 +2270,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Continuar Assistindo',
-          style: TextStyle(
+        Text(
+          AppLanguage.text('Continuar Assistindo', 'Continue Watching'),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -1830,7 +2341,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  _buildImage(item.imageUrl),
+                  _buildImage(item.imageUrl, logicalWidth: width),
                   Container(
                     decoration: const BoxDecoration(
                       gradient: LinearGradient(
@@ -1908,9 +2419,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'Favoritos',
-              style: TextStyle(
+            Text(
+              AppLanguage.text('Favoritos', 'Favorites'),
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
@@ -1932,9 +2443,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   baseColor: const Color(0xFF101216),
                   radius: 12,
                 ),
-                child: const Text(
-                  'Ver tudo',
-                  style: TextStyle(
+                child: Text(
+                  AppLanguage.text('Ver tudo', 'View all'),
+                  style: const TextStyle(
                     color: Color(0xFFD8C6FF),
                     fontWeight: FontWeight.bold,
                   ),
@@ -1997,7 +2508,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _buildImage(item.imageUrl),
+            _buildImage(item.imageUrl, logicalWidth: width),
             Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
@@ -2010,8 +2521,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Positioned(
               top: 10,
               left: 10,
-              child:
-                  _buildBadge(item.type == 'live' ? 'AO VIVO' : item.category),
+              child: _buildBadge(item.type == 'live'
+                  ? AppLanguage.text('AO VIVO', 'LIVE')
+                  : item.category),
             ),
             const Positioned(
               top: 12,
@@ -2067,9 +2579,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Jogos do Dia',
-          style: TextStyle(
+        Text(
+          AppLanguage.text('Jogos do Dia', "Today's Games"),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -2141,7 +2653,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _buildImage(item.imageUrl),
+            _buildImage(item.imageUrl, logicalWidth: width),
             Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
@@ -2154,7 +2666,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Positioned(
               top: 10,
               left: 10,
-              child: _buildBadge('AO VIVO'),
+              child: _buildBadge(AppLanguage.text('AO VIVO', 'LIVE')),
             ),
             if (hasReminder || canScheduleReminder)
               Positioned(
@@ -2289,12 +2801,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildSearchBar({bool compact = false}) {
     final sectionName = _activeSection == HomeSection.live
-        ? 'canais'
+        ? AppLanguage.text('canais', 'channels')
         : _activeSection == HomeSection.movies
-            ? 'filmes'
+            ? AppLanguage.text('filmes', 'movies')
             : _activeSection == HomeSection.series
-                ? 'series'
-                : 'conteudos';
+                ? AppLanguage.text('séries', 'series')
+                : AppLanguage.text('conteúdos', 'content');
 
     return Focus(
       canRequestFocus: false,
@@ -2309,7 +2821,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           style: TextStyle(color: Colors.white, fontSize: compact ? 14 : 18),
           cursorColor: const Color(0xFFB47CFF),
           decoration: InputDecoration(
-            hintText: 'Pesquisar $sectionName',
+            hintText: '${AppLanguage.text('Pesquisar', 'Search')} $sectionName',
             hintStyle: const TextStyle(color: Colors.white54),
             filled: true,
             fillColor: const Color(0xFF101216),
@@ -2353,8 +2865,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (items.isEmpty) {
       final message = _searchQuery.trim().isEmpty
-          ? 'Nenhum conteudo encontrado nesta categoria.'
-          : 'Nenhum resultado para "${_searchQuery.trim()}".';
+          ? AppLanguage.text(
+              'Nenhum conteúdo encontrado nesta categoria.',
+              'No content was found in this category.',
+            )
+          : AppLanguage.text(
+              'Nenhum resultado para "${_searchQuery.trim()}".',
+              'No results for "${_searchQuery.trim()}".',
+            );
       return Center(
         child: Text(
           message,
@@ -2399,15 +2917,32 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       decoration: _panelDecoration(radius: 18),
       child: Column(
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 12, 16, 10),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
             child: Row(
               children: [
-                SizedBox(width: 64, child: Text('CANAL', style: _HeaderText())),
-                Expanded(flex: 3, child: Text('NOME', style: _HeaderText())),
-                Expanded(flex: 3, child: Text('AGORA', style: _HeaderText())),
-                Expanded(flex: 3, child: Text('PROXIMO', style: _HeaderText())),
-                SizedBox(width: 40, child: Text('FAV', style: _HeaderText())),
+                SizedBox(
+                  width: 64,
+                  child: Text(AppLanguage.text('CANAL', 'CHANNEL'),
+                      style: const _HeaderText()),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(AppLanguage.text('NOME', 'NAME'),
+                      style: const _HeaderText()),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(AppLanguage.text('AGORA', 'NOW'),
+                      style: const _HeaderText()),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(AppLanguage.text('PRÓXIMO', 'NEXT'),
+                      style: const _HeaderText()),
+                ),
+                const SizedBox(
+                    width: 40, child: Text('FAV', style: _HeaderText())),
               ],
             ),
           ),
@@ -2524,7 +3059,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _buildHorizontalRail(List<IptvContentItem> items,
       {bool compact = false}) {
     if (items.isEmpty) {
-      return _buildInlineError('Nenhum conteudo carregado.');
+      return _buildInlineError(AppLanguage.text(
+        'Nenhum conteúdo carregado.',
+        'No content loaded.',
+      ));
     }
 
     return SizedBox(
@@ -2572,7 +3110,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: SizedBox(
                 width: 74,
                 height: 74,
-                child: _buildImage(item.imageUrl),
+                child: _buildImage(item.imageUrl, logicalWidth: 74),
               ),
             ),
             const SizedBox(width: 14),
@@ -2646,7 +3184,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  _buildImage(item.imageUrl),
+                  _buildImage(item.imageUrl, logicalWidth: 170),
                   if (showCategoryBadge)
                     Positioned(
                       top: 8,
@@ -2694,21 +3232,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildImage(String url) {
+  Widget _buildImage(String url, {double? logicalWidth}) {
     if (url.isEmpty) {
       return _buildFallbackImage();
     }
 
+    final cacheWidth = logicalWidth == null
+        ? null
+        : (logicalWidth * MediaQuery.devicePixelRatioOf(context))
+            .ceil()
+            .clamp(1, 768);
     return Image.network(
       url,
       fit: BoxFit.cover,
+      cacheWidth: cacheWidth,
       errorBuilder: (_, __, ___) => _buildFallbackImage(),
-      loadingBuilder: (context, child, loadingProgress) {
-        if (loadingProgress == null) {
-          return child;
-        }
-        return _buildFallbackImage();
-      },
+      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) =>
+          wasSynchronouslyLoaded || frame != null
+              ? child
+              : _buildFallbackImage(),
     );
   }
 
@@ -2727,9 +3269,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Configuracoes',
-            style: TextStyle(
+          Text(
+            AppLanguage.text('Configurações', 'Settings'),
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 20,
               fontWeight: FontWeight.bold,
@@ -2737,15 +3279,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 16),
           if (_errorMessage != null) ...[
-            _buildInlineError('Erro atual: $_errorMessage'),
+            _buildInlineError(
+              '${AppLanguage.text('Erro atual', 'Current error')}: $_errorMessage',
+            ),
             const SizedBox(height: 12),
           ],
-          _buildInlineError('Servidor ativo: $_serverName'),
+          _buildInlineError(
+            '${AppLanguage.text('Servidor ativo', 'Active server')}: $_serverName',
+          ),
           const SizedBox(height: 14),
           _buildInlineError(
             _adultContentBlocked
-                ? 'Controle parental: categorias XXX bloqueadas.'
-                : 'Controle parental: categorias XXX liberadas.',
+                ? AppLanguage.text(
+                    'Controle parental: categorias XXX bloqueadas.',
+                    'Parental controls: XXX categories are blocked.',
+                  )
+                : AppLanguage.text(
+                    'Controle parental: categorias XXX liberadas.',
+                    'Parental controls: XXX categories are allowed.',
+                  ),
           ),
           const SizedBox(height: 14),
           _buildFocusButton(
@@ -2753,8 +3305,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ? Icons.lock_rounded
                 : Icons.lock_open_rounded,
             label: _adultContentBlocked
-                ? 'Liberar Conteudo Adulto'
-                : 'Bloquear Conteudo Adulto',
+                ? AppLanguage.text(
+                    'Liberar Conteúdo Adulto',
+                    'Allow Adult Content',
+                  )
+                : AppLanguage.text(
+                    'Bloquear Conteúdo Adulto',
+                    'Block Adult Content',
+                  ),
             onPressed: _toggleAdultContentBlock,
             focusNode: _parentalToggleFocusNode,
             moveLeftToSidebar: true,
@@ -2762,21 +3320,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.pin_rounded,
-            label: 'Alterar Senha Parental',
+            label: AppLanguage.text(
+              'Alterar Senha Parental',
+              'Change Parental PIN',
+            ),
             onPressed: _changeParentalPin,
             focusNode: _changeParentalPinFocusNode,
           ),
           const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.dns_rounded,
-            label: 'Trocar Servidor',
+            label: AppLanguage.text('Trocar Servidor', 'Switch Server'),
             onPressed: _handleChangeServer,
             focusNode: _changeServerFocusNode,
           ),
           const SizedBox(height: 12),
           _buildFocusButton(
             icon: Icons.exit_to_app,
-            label: 'Sair da Conta',
+            label: AppLanguage.text('Sair da Conta', 'Sign Out'),
             onPressed: _handleLogout,
             focusNode: _logoutAccountFocusNode,
           ),
@@ -2786,16 +3347,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildLoading() {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(color: Color(0xFF6A00FF)),
-          SizedBox(height: 16),
+          const CircularProgressIndicator(color: Color(0xFF6A00FF)),
+          const SizedBox(height: 16),
           Text(
-            'Carregando catalogo IPTV...',
-            style:
-                TextStyle(color: Colors.white70, fontWeight: FontWeight.bold),
+            AppLanguage.text(
+              'Carregando catálogo IPTV...',
+              'Loading IPTV catalog...',
+            ),
+            style: const TextStyle(
+                color: Colors.white70, fontWeight: FontWeight.bold),
           ),
         ],
       ),
@@ -2813,14 +3377,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 color: Colors.redAccent, size: 42),
             const SizedBox(height: 12),
             Text(
-              _errorMessage ?? 'Falha ao carregar conteudo IPTV.',
+              _errorMessage ??
+                  AppLanguage.text(
+                    'Falha ao carregar conteúdo IPTV.',
+                    'Unable to load IPTV content.',
+                  ),
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70),
             ),
             const SizedBox(height: 16),
             _buildFocusButton(
               icon: Icons.refresh,
-              label: 'Tentar Novamente',
+              label: AppLanguage.text('Tentar Novamente', 'Try Again'),
               onPressed: () => _loadHome(refreshServersFirst: true),
               moveLeftToSidebar: true,
             ),

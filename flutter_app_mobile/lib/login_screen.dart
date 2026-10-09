@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_service.dart';
+import 'authorization_notice.dart';
+import 'app_language.dart';
 import 'server_selection_screen.dart';
 import 'device_info.dart';
 import 'tv_focus.dart';
@@ -32,6 +34,7 @@ class _LoginScreenState extends State<LoginScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
+        showPendingAuthorizationNotice(context);
         FocusScope.of(context).requestFocus(_codeFocusNode);
         Future.delayed(const Duration(milliseconds: 120), () {
           if (mounted) {
@@ -61,7 +64,10 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (code.isEmpty || user.isEmpty || pass.isEmpty) {
       setState(() {
-        _errorMessage = 'Preencha todos os campos.';
+        _errorMessage = AppLanguage.text(
+          'Preencha todos os campos.',
+          'Fill in all fields.',
+        );
       });
       return;
     }
@@ -85,15 +91,19 @@ class _LoginScreenState extends State<LoginScreen> {
         deviceId: widget.deviceId,
         deviceInfo: info,
       );
-
-      final dnsList = response['servers'] as List<dynamic>? ?? [];
       if (!mounted) {
         return;
       }
+      AppLanguage.updateFromLoginResponse(response);
+
+      final dnsList = response['servers'] as List<dynamic>? ?? [];
 
       if (dnsList.isEmpty) {
         setState(() {
-          _errorMessage = 'Nenhum servidor autorizado encontrado.';
+          _errorMessage = AppLanguage.text(
+            'Nenhum servidor autorizado encontrado.',
+            'No authorized server was found.',
+          );
         });
       } else if (dnsList.length == 1) {
         final server = dnsList.first;
@@ -101,13 +111,21 @@ class _LoginScreenState extends State<LoginScreen> {
         await prefs.setString('selected_server_id', server['id'] ?? '');
         await prefs.setString('selected_server_url',
             server['url'] ?? server['baseUrl'] ?? server['server_url'] ?? '');
-        await prefs.setString('selected_server_name',
-            server['display_name'] ?? server['name'] ?? 'Servidor');
+        await prefs.setString(
+          'selected_server_name',
+          server['display_name'] ??
+              server['name'] ??
+              AppLanguage.text('Servidor', 'Server'),
+        );
         if (!mounted) {
           return;
         }
 
-        Navigator.of(context).pushReplacementNamed('/home');
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          '/home',
+          (route) => false,
+          arguments: const {'skipInitialSessionRevalidation': true},
+        );
       } else {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
@@ -293,7 +311,7 @@ class _LoginScreenState extends State<LoginScreen> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          'Entrar',
+          AppLanguage.text('Entrar', 'Sign In'),
           style: TextStyle(
             color: Colors.white,
             fontSize: compact ? 22 : 26,
@@ -320,7 +338,7 @@ class _LoginScreenState extends State<LoginScreen> {
           SizedBox(height: compact ? 8 : 10),
         ],
         _buildNativeInputField(
-          label: 'Codigo',
+          label: AppLanguage.text('Código', 'Code'),
           icon: Icons.confirmation_number_outlined,
           controller: _codeController,
           focusNode: _codeFocusNode,
@@ -329,7 +347,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         SizedBox(height: compact ? 7 : 9),
         _buildNativeInputField(
-          label: 'Usuario',
+          label: AppLanguage.text('Usuário', 'Username'),
           icon: Icons.person_outline,
           controller: _userController,
           focusNode: _userFocusNode,
@@ -338,7 +356,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         SizedBox(height: compact ? 7 : 9),
         _buildNativeInputField(
-          label: 'Senha',
+          label: AppLanguage.text('Senha', 'Password'),
           icon: Icons.lock_outline,
           controller: _passController,
           focusNode: _passFocusNode,
@@ -370,7 +388,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     )
                   : Text(
-                      'ENTRAR',
+                      AppLanguage.text('ENTRAR', 'SIGN IN'),
                       style: TextStyle(
                         color: focused ? const Color(0xFF6A00FF) : Colors.white,
                         fontWeight: FontWeight.bold,

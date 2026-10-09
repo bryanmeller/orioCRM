@@ -6,9 +6,12 @@ import 'package:media_kit/media_kit.dart';
 import 'initial_screen.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
+import 'movie_details_screen.dart';
 import 'player_screen.dart';
 import 'series_details_screen.dart';
 import 'api_service.dart';
+import 'app_language.dart';
+import 'device_info.dart';
 import 'reminder_service.dart';
 
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
@@ -23,11 +26,27 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  final hasSavedSession = await ApiService.hasSavedSession();
+  final deviceId = await DeviceInfoHelper.getDeviceId();
+  await AppLanguage.load();
+  var hasSavedSession = await ApiService.validateSavedSession(
+    deviceId: deviceId,
+    revalidateWithServer: true,
+  );
+  if (hasSavedSession) {
+    try {
+      await ApiService.refreshSavedSession(
+        deviceId: deviceId,
+        logoutOnRevoked: true,
+      );
+    } catch (_) {
+      // A temporary API failure must not erase a saved session.
+    }
+    hasSavedSession = await ApiService.isSavedSessionLocallyValid();
+  }
   final initialRoute = hasSavedSession ? '/home' : '/';
 
   runApp(
-    StreamFlixApp(
+    OrioPlayerApp(
       initialRoute: initialRoute,
     ),
   );
@@ -50,21 +69,21 @@ Future<void> _initializeRemindersAfterStartup() async {
   }
 }
 
-class StreamFlixApp extends StatefulWidget {
+class OrioPlayerApp extends StatefulWidget {
   final String initialRoute;
   final String? initialReminderEventId;
 
-  const StreamFlixApp({
+  const OrioPlayerApp({
     Key? key,
     required this.initialRoute,
     this.initialReminderEventId,
   }) : super(key: key);
 
   @override
-  State<StreamFlixApp> createState() => _StreamFlixAppState();
+  State<OrioPlayerApp> createState() => _OrioPlayerAppState();
 }
 
-class _StreamFlixAppState extends State<StreamFlixApp> {
+class _OrioPlayerAppState extends State<OrioPlayerApp> {
   late final Stream<String> _notificationTapStream;
   StreamSubscription<String>? _notificationTapSubscription;
 
@@ -89,7 +108,11 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
       return;
     }
 
-    final hasSavedSession = await ApiService.hasSavedSession();
+    final deviceId = await DeviceInfoHelper.getDeviceId();
+    final hasSavedSession = await ApiService.validateSavedSession(
+      deviceId: deviceId,
+      revalidateWithServer: true,
+    );
     final navigator = appNavigatorKey.currentState;
     if (navigator == null) {
       return;
@@ -110,7 +133,7 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Orio CRM Mobile',
+      title: 'ORIO PLAYER',
       navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -143,9 +166,12 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
             final reminderEventId =
                 (args['reminderEventId'] ?? widget.initialReminderEventId)
                     ?.toString();
+            final skipInitialSessionRevalidation =
+                args['skipInitialSessionRevalidation'] == true;
             return MaterialPageRoute(
               builder: (_) => HomeScreen(
                 initialReminderEventId: reminderEventId,
+                skipInitialSessionRevalidation: skipInitialSessionRevalidation,
               ),
             );
           case '/player':
@@ -163,7 +189,8 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
                 : <IptvContentItem>[];
             return MaterialPageRoute(
               builder: (_) => PlayerScreen(
-                title: args['title'] ?? 'Reprodução',
+                title:
+                    args['title'] ?? AppLanguage.text('Reprodução', 'Playback'),
                 subtitle: args['subtitle'] ?? '',
                 description: (args['description'] ?? '').toString(),
                 imageUrl: (args['imageUrl'] ?? '').toString(),
@@ -184,6 +211,26 @@ class _StreamFlixAppState extends State<StreamFlixApp> {
                 ),
               ),
             );
+          case '/movie':
+            final args = settings.arguments;
+            final movie = args is IptvContentItem
+                ? args
+                : args is Map<String, dynamic>
+                    ? args['movie']
+                    : null;
+            final relatedMovies = args is Map<String, dynamic> &&
+                    args['movies'] is List
+                ? (args['movies'] as List).whereType<IptvContentItem>().toList()
+                : <IptvContentItem>[];
+            if (movie is IptvContentItem) {
+              return MaterialPageRoute(
+                builder: (_) => MovieDetailsScreen(
+                  movie: movie,
+                  relatedMovies: relatedMovies,
+                ),
+              );
+            }
+            return MaterialPageRoute(builder: (_) => const HomeScreen());
           case '/series':
             final series = settings.arguments;
             if (series is IptvContentItem) {
@@ -208,7 +255,10 @@ class _LoginGate extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<bool>(
-      future: ApiService.hasSavedSession(),
+      future: ApiService.validateSavedSession(
+        deviceId: deviceId,
+        revalidateWithServer: true,
+      ),
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Scaffold(

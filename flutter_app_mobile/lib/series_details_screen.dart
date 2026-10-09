@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'api_service.dart';
+import 'app_language.dart';
 import 'player_return_guard.dart';
 import 'tv_focus.dart';
 import 'tv_safe_area.dart';
@@ -71,19 +72,24 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF101216),
-        title: const Text('Continuar assistindo?'),
+        title: Text(
+          AppLanguage.text('Continuar assistindo?', 'Continue watching?'),
+        ),
         content: Text(
-          'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+          AppLanguage.text(
+            'Voce parou em ${_formatResumeTime(position)}. Deseja continuar de onde parou?',
+            'You stopped at ${_formatResumeTime(position)}. Continue where you left off?',
+          ),
         ),
         actions: [
           TextButton(
             autofocus: true,
             onPressed: () => Navigator.of(context).pop(position),
-            child: const Text('Continuar'),
+            child: Text(AppLanguage.text('Continuar', 'Continue')),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(Duration.zero),
-            child: const Text('Ver do inicio'),
+            child: Text(AppLanguage.text('Ver do inicio', 'Start over')),
           ),
         ],
       ),
@@ -379,13 +385,13 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
           baseColor: const Color(0xFF101216),
           radius: 14,
         ),
-        child: const Row(
+        child: Row(
           children: [
-            Icon(Icons.arrow_back, color: Colors.white70, size: 20),
-            SizedBox(width: 10),
+            const Icon(Icons.arrow_back, color: Colors.white70, size: 20),
+            const SizedBox(width: 10),
             Text(
-              'Voltar',
-              style: TextStyle(
+              AppLanguage.text('Voltar', 'Back'),
+              style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
               ),
@@ -411,14 +417,14 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
           radius: 14,
           focusedColor: const Color(0xFFB47CFF),
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.play_arrow, color: Colors.white),
-            SizedBox(width: 8),
+            const Icon(Icons.play_arrow, color: Colors.white),
+            const SizedBox(width: 8),
             Text(
-              'Assistir',
-              style: TextStyle(
+              AppLanguage.text('Assistir', 'Watch'),
+              style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
               ),
@@ -430,15 +436,18 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
   }
 
   Widget _buildLoading() {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(color: Color(0xFF6A00FF)),
-          SizedBox(height: 16),
+          const CircularProgressIndicator(color: Color(0xFF6A00FF)),
+          const SizedBox(height: 16),
           Text(
-            'Carregando temporadas...',
-            style: TextStyle(color: Colors.white70),
+            AppLanguage.text(
+              'Carregando temporadas...',
+              'Loading seasons...',
+            ),
+            style: const TextStyle(color: Colors.white70),
           ),
         ],
       ),
@@ -457,7 +466,10 @@ class _SeriesDetailsScreenState extends State<SeriesDetailsScreen> {
             const SizedBox(height: 12),
             Text(
               error?.toString().replaceAll('Exception: ', '') ??
-                  'Falha ao carregar a serie.',
+                  AppLanguage.text(
+                    'Falha ao carregar a serie.',
+                    'Unable to load the series.',
+                  ),
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70),
             ),
